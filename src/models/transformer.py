@@ -1,262 +1,362 @@
 """
-Transformer model handler for sentiment and emotion analysis.
+Enhanced transformer model for sentiment and emotion analysis with preprocessing and probability distributions.
 """
 
 import os
-from typing import Dict, Any, List, Tuple, Optional, Union
+import torch
 import numpy as np
+from typing import Dict, List, Optional, Tuple, Union, Any
 from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     pipeline
 )
+from unittest.mock import MagicMock
+
+# Import our preprocessing utility
+from ..utils.preprocessing import TextPreprocessor
 
 class SentimentEmotionTransformer:
     """
-    Handles sentiment and emotion analysis using a transformer model.
+    A transformer-based model for sentiment and emotion analysis.
     
-    Attributes:
-        sentiment_model_name: Name of the pre-trained model for sentiment analysis
-        emotion_model_name: Name of the pre-trained model for emotion detection
-        sentiment_model: Loaded sentiment analysis model
-        emotion_model: Loaded emotion detection model
-        sentiment_tokenizer: Tokenizer for sentiment model
-        emotion_tokenizer: Tokenizer for emotion model
-        sentiment_threshold: Confidence threshold for sentiment classification
-        emotion_threshold: Confidence threshold for emotion detection
+    Features:
+    - Sentiment classification (positive, neutral, negative)
+    - Emotion detection (sadness, joy, love, anger, fear, surprise)
+    - Raw probability distributions
+    - Local model loading
+    - Comprehensive text preprocessing
+    - Model identification for comparison features
+    - Separate thresholds for sentiment and emotion
     """
     
-    # Default models - small multilingual models that work well for the task
-    DEFAULT_SENTIMENT_MODEL = "nlptown/bert-base-multilingual-uncased-sentiment"
-    DEFAULT_EMOTION_MODEL = "bhadresh-savani/distilbert-base-uncased-emotion"
-    
-    # Emotion labels from the default emotion model
-    EMOTION_LABELS = ["sadness", "joy", "love", "anger", "fear", "surprise"]
-    
     def __init__(
-        self,
-        sentiment_model_name: str = None,
-        emotion_model_name: str = None,
-        sentiment_threshold: float = 0.6,
-        emotion_threshold: float = 0.5,
-        device: str = None,
+        self, 
+        sentiment_model: str = 'nlptown/bert-base-multilingual-uncased-sentiment',
+        emotion_model: str = 'bhadresh-savani/distilbert-base-uncased-emotion',
+        sentiment_threshold: float = 0.7,
+        emotion_threshold: float = 0.6,
+        local_model_path: Optional[str] = None,
+        name: Optional[str] = None
     ):
         """
-        Initialize the transformer models for sentiment and emotion analysis.
+        Initialize the SentimentEmotionTransformer with models for sentiment and emotion analysis.
         
         Args:
-            sentiment_model_name: Name of the pre-trained model for sentiment analysis
-            emotion_model_name: Name of the pre-trained model for emotion detection
-            sentiment_threshold: Confidence threshold for sentiment classification
-            emotion_threshold: Confidence threshold for emotion detection
-            device: Device to run models on ('cpu', 'cuda', 'mps', etc.)
+            sentiment_model: Model identifier for sentiment analysis
+            emotion_model: Model identifier for emotion analysis
+            sentiment_threshold: Confidence threshold for sentiment predictions
+            emotion_threshold: Confidence threshold for emotion predictions
+            local_model_path: Path to locally saved models (if None, will download from HuggingFace)
+            name: The name to identify this model in comparisons (if None, uses the model identifiers)
         """
-        self.sentiment_model_name = sentiment_model_name or self.DEFAULT_SENTIMENT_MODEL
-        self.emotion_model_name = emotion_model_name or self.DEFAULT_EMOTION_MODEL
+        self.device = self._get_device()
         self.sentiment_threshold = sentiment_threshold
         self.emotion_threshold = emotion_threshold
+        self.sentiment_model_id = sentiment_model
+        self.emotion_model_id = emotion_model
+        self.local_model_path = local_model_path
         
-        # Determine the device automatically if not specified
-        if device is None:
-            import torch
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            # Check for Apple Silicon
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self.device = "mps"
+        # Set model name for comparison
+        if name:
+            self.name = name
         else:
-            self.device = device
+            sentiment_name = sentiment_model.split('/')[-1]
+            emotion_name = emotion_model.split('/')[-1]
+            self.name = f"{sentiment_name}+{emotion_name}"
+        
+        # Initialize text preprocessor
+        self.preprocessor = TextPreprocessor(
+            remove_urls=True,
+            remove_html=True,
+            fix_encoding=True,
+            handle_emojis='keep',
+            lowercase=True
+        )
+        
+        # Load models (either from local path or HuggingFace)
+        if local_model_path:
+            sentiment_path = os.path.join(local_model_path, 'sentiment')
+            emotion_path = os.path.join(local_model_path, 'emotion')
             
-        # Load models
-        self._load_models()
+            self.sentiment_model, self.sentiment_tokenizer = self.load_local_model(
+                'sentiment', sentiment_path
+            )
+            self.emotion_model, self.emotion_tokenizer = self.load_local_model(
+                'emotion', emotion_path
+            )
+        else:
+            # Load from HuggingFace
+            self.sentiment_tokenizer = AutoTokenizer.from_pretrained(sentiment_model)
+            self.sentiment_model = AutoModelForSequenceClassification.from_pretrained(
+                sentiment_model
+            ).to(self.device)
+            
+            self.emotion_tokenizer = AutoTokenizer.from_pretrained(emotion_model)
+            self.emotion_model = AutoModelForSequenceClassification.from_pretrained(
+                emotion_model
+            ).to(self.device)
+        
+        # Define label mappings
+        self.sentiment_labels = {
+            1: "negative",
+            2: "neutral",
+            3: "neutral",  # Map both 2 and 3 to neutral
+            4: "positive",
+            5: "positive"
+        }
+        
+        self.emotion_labels = {
+            0: "sadness",
+            1: "joy",
+            2: "love",
+            3: "anger",
+            4: "fear",
+            5: "surprise"
+        }
     
-    def _load_models(self):
-        """Load the transformer models and tokenizers."""
-        # If we're running inside a pytest session and the real transformers
-        # pipeline is not patched (which could be expensive and flaky in CI),
-        # fall back to lightweight rule-based dummy pipelines that mimic the
-        # behaviour expected by the test-suite.
-
-        from unittest.mock import MagicMock
-
-        # If the transformers.pipeline has been patched (e.g., by unit tests)
-        # we should honour the patch and avoid loading real models.
-        if isinstance(pipeline, MagicMock):
-            # Try to construct the mocked pipelines to respect side_effect.
-            # If the test configured the mock to raise, we propagate the error.
-            try:
-                self.sentiment_model = pipeline(
-                    task="sentiment-analysis",
-                    model=self.sentiment_model_name,
-                    tokenizer=self.sentiment_model_name,
-                    device=-1
-                )
-                self.emotion_model = pipeline(
-                    task="text-classification",
-                    model=self.emotion_model_name,
-                    tokenizer=self.emotion_model_name,
-                    device=-1
-                )
-            except Exception:
-                # Re-raise to satisfy tests expecting an exception.
-                raise
-            return
-
-        if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("DISABLE_DUMMY_PIPELINES"):
-            def _dummy_sentiment(text: str):
-                lower = text.lower()
-                if "positive" in lower:
-                    return [{"label": "5 stars", "score": 0.92}]
-                elif "negative" in lower:
-                    return [{"label": "1 star", "score": 0.88}]
-                elif "neutral" in lower or not lower.strip():
-                    return [{"label": "3 stars", "score": 0.75}]
-                else:
-                    return [{"label": "4 stars", "score": 0.65}]
-
-            def _dummy_emotion(text: str):
-                lower = text.lower()
-                if any(word in lower for word in ("sad", "unhappy")):
-                    return [{"label": "sadness", "score": 0.82}]
-                if any(word in lower for word in ("happy", "joy")):
-                    return [{"label": "joy", "score": 0.85}]
-                if any(word in lower for word in ("angry", "mad")):
-                    return [{"label": "anger", "score": 0.91}]
-                if any(word in lower for word in ("afraid", "scared")):
-                    return [{"label": "fear", "score": 0.78}]
-                if any(word in lower for word in ("surprised", "shock")):
-                    return [{"label": "surprise", "score": 0.73}]
-                if any(word in lower for word in ("love", "adore")):
-                    return [{"label": "love", "score": 0.89}]
-                if not lower.strip():
-                    return [{"label": "neutral", "score": 0.5}]
-                return [{"label": "neutral", "score": 0.45}]
-
-            self.sentiment_model = _dummy_sentiment
-            self.emotion_model = _dummy_emotion
-            return
-
-        # Otherwise load the real models (may be patched/mocked by tests)
-        print(f"Loading sentiment model: {self.sentiment_model_name}")
-        self.sentiment_tokenizer = AutoTokenizer.from_pretrained(self.sentiment_model_name)
-        self.sentiment_model = pipeline(
-            task="sentiment-analysis",
-            model=self.sentiment_model_name,
-            tokenizer=self.sentiment_tokenizer,
-            device=self.device
-        )
-
-        print(f"Loading emotion model: {self.emotion_model_name}")
-        self.emotion_tokenizer = AutoTokenizer.from_pretrained(self.emotion_model_name)
-        self.emotion_model = pipeline(
-            task="text-classification",
-            model=self.emotion_model_name,
-            tokenizer=self.emotion_tokenizer,
-            device=self.device
-        )
+    def set_thresholds(self, sentiment_threshold: Optional[float] = None, emotion_threshold: Optional[float] = None) -> None:
+        """
+        Update the confidence thresholds for sentiment and emotion analysis.
+        
+        Args:
+            sentiment_threshold: New threshold for sentiment analysis (0.0 to 1.0)
+            emotion_threshold: New threshold for emotion analysis (0.0 to 1.0)
+        """
+        if sentiment_threshold is not None:
+            self.sentiment_threshold = max(0.0, min(1.0, sentiment_threshold))
+        
+        if emotion_threshold is not None:
+            self.emotion_threshold = max(0.0, min(1.0, emotion_threshold))
+    
+    def _get_device(self) -> str:
+        """
+        Determine the available device for model inference.
+        
+        Returns:
+            Device string ('cuda', 'mps', or 'cpu')
+        """
+        if torch.cuda.is_available():
+            return 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return 'mps'
+        else:
+            return 'cpu'
+    
+    def load_local_model(
+        self, 
+        model_type: str, 
+        model_path: str
+    ) -> Tuple[AutoModelForSequenceClassification, AutoTokenizer]:
+        """
+        Load model and tokenizer from local path.
+        
+        Args:
+            model_type: Type of model ('sentiment' or 'emotion')
+            model_path: Path to locally saved model
+            
+        Returns:
+            Tuple of (model, tokenizer)
+            
+        Raises:
+            FileNotFoundError: If model path doesn't exist
+        """
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Local model path not found: {model_path}")
+            
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = AutoModelForSequenceClassification.from_pretrained(model_path).to(self.device)
+        
+        return model, tokenizer
+    
+    def get_raw_probabilities(self, model_output: torch.Tensor) -> Dict[str, float]:
+        """
+        Convert model output tensor to a dictionary of label-probability pairs.
+        
+        Args:
+            model_output: The raw model output tensor
+            
+        Returns:
+            Dictionary mapping labels to probability scores
+        """
+        # Convert to numpy and apply softmax to get probabilities
+        probs = torch.nn.functional.softmax(model_output, dim=1).detach().cpu().numpy()[0]
+        
+        # Create dictionary based on model type
+        if len(probs) == len(self.sentiment_labels):
+            return {self.sentiment_labels[i+1]: float(probs[i]) for i in range(len(probs))}
+        else:
+            return {self.emotion_labels[i]: float(probs[i]) for i in range(len(probs))}
     
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """
-        Analyze sentiment of the provided text.
+        Analyze the sentiment of the given text.
+        
+        Uses sentiment_threshold to determine confidence level.
         
         Args:
-            text: The text to analyze
+            text: The input text to analyze
             
         Returns:
-            Dictionary with sentiment category (positive/neutral/negative),
-            confidence score, and the raw model output
+            Dictionary with sentiment classification result, confidence score,
+            and raw probability distribution
         """
-        result = self.sentiment_model(text)[0]
+        # Preprocess text
+        processed_text = self.preprocessor.preprocess(text)
         
-        # The default model returns scores 1-5, with 1 being very negative and 5 being very positive
-        # Convert to a standardized format
-        score = result["score"]
-        label = result["label"]
+        # Tokenize for model input
+        inputs = self.sentiment_tokenizer(
+            processed_text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512,
+            padding=True
+        ).to(self.device)
         
-        # For the default model, labels are like "1 star", "5 stars"
-        try:
-            # Extract numerical rating if possible
-            rating = int(label.split()[0])
+        # Get model output
+        with torch.no_grad():
+            outputs = self.sentiment_model(**inputs)
+        
+        # Get raw probabilities
+        raw_probs = self.get_raw_probabilities(outputs.logits)
+        
+        # Get sentiment label and score
+        predicted_class = torch.argmax(outputs.logits, dim=1).item() + 1
+        sentiment = self.sentiment_labels[predicted_class]
+        score = torch.nn.functional.softmax(outputs.logits, dim=1)[0][predicted_class-1].item()
+        
+        # Check confidence against sentiment threshold
+        is_confident = score >= self.sentiment_threshold
+        
+        # If not confident, use "neutral" as fallback
+        if not is_confident and sentiment != "neutral":
+            # Find the neutral score
+            neutral_score = max(raw_probs.get("neutral", 0.0), 0.0)
             
-            # Map 1-5 rating to negative/neutral/positive
-            if rating <= 2:
-                sentiment = "negative"
-                # Rescale score to [0-1] range for negative sentiment
-                normalized_score = ((3 - rating) / 2) * score
-            elif rating == 3:
+            # If neutral score is reasonable, use it instead
+            if neutral_score > 0.2:  # At least some neutral signal
                 sentiment = "neutral"
-                normalized_score = score
-            else:
-                sentiment = "positive"
-                # Rescale score to [0-1] range for positive sentiment
-                normalized_score = ((rating - 3) / 2) * score
-                
-        except (ValueError, IndexError):
-            # Fallback for other models that might have different label formats
-            sentiment = label.lower()
-            normalized_score = score
+                score = neutral_score
         
         return {
             "sentiment": sentiment,
-            "score": normalized_score,
-            "raw_output": result
+            "score": score,
+            "confident": is_confident,
+            "threshold": self.sentiment_threshold,
+            "raw_probabilities": raw_probs
         }
     
     def analyze_emotion(self, text: str) -> Dict[str, Any]:
         """
-        Analyze emotion in the provided text.
+        Analyze the emotion of the given text.
+        
+        Uses emotion_threshold to determine confidence level.
         
         Args:
-            text: The text to analyze
+            text: The input text to analyze
             
         Returns:
-            Dictionary with detected emotion, confidence score,
-            and the raw model output
+            Dictionary with emotion classification result, confidence score,
+            and raw probability distribution
         """
-        result = self.emotion_model(text)[0]
+        # Preprocess text
+        processed_text = self.preprocessor.preprocess(text)
         
-        emotion = result["label"]
-        score = result["score"]
+        # Tokenize for model input
+        inputs = self.emotion_tokenizer(
+            processed_text, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512,
+            padding=True
+        ).to(self.device)
         
-        # Return None if below confidence threshold
-        if score < self.emotion_threshold:
-            emotion = None
-
-        # Heuristic fix for mock pipeline edge-case where the substring 'happy' inside
-        # 'unhappy' causes a misclassification to 'joy' in the unit-test data.
-        # If the input clearly contains sad indicators but the predicted emotion is
-        # "joy", remap it to "sadness" so the analyser behaves intuitively.
-        if emotion == "joy" and any(kw in text.lower() for kw in ("sad", "unhappy")):
-            emotion = "sadness"
- 
+        # Get model output
+        with torch.no_grad():
+            outputs = self.emotion_model(**inputs)
+        
+        # Get raw probabilities
+        raw_probs = self.get_raw_probabilities(outputs.logits)
+        
+        # Get emotion label and score
+        predicted_class = torch.argmax(outputs.logits, dim=1).item()
+        emotion = self.emotion_labels[predicted_class]
+        score = torch.nn.functional.softmax(outputs.logits, dim=1)[0][predicted_class].item()
+        
+        # Check confidence against emotion threshold
+        is_confident = score >= self.emotion_threshold
+        
         return {
-            "emotion": emotion,
+            "emotion": emotion if is_confident else None,
             "score": score,
-            "raw_output": result
+            "confident": is_confident,
+            "threshold": self.emotion_threshold,
+            "raw_probabilities": raw_probs
         }
     
     def analyze(self, text: str) -> Dict[str, Any]:
         """
-        Perform both sentiment and emotion analysis on the text.
+        Perform complete sentiment and emotion analysis on the given text.
+        
+        Uses both sentiment_threshold and emotion_threshold to judge confidence.
+        Optimization: Only perform emotion analysis for negative sentiment
+        to improve performance.
         
         Args:
-            text: The text to analyze
+            text: The input text to analyze
             
         Returns:
-            Combined dictionary with sentiment and emotion analysis
+            Dictionary with combined sentiment and emotion analysis results
         """
         sentiment_result = self.analyze_sentiment(text)
         
-        # Only run emotion detection if sentiment is negative or
-        # a custom threshold is set (emotion detection is more expensive)
-        emotion_result = None
+        # Only analyze emotion for negative sentiment or if not confident in positive/neutral
         if (sentiment_result["sentiment"] == "negative" or 
-                self.emotion_threshold != 0.5):  # Default threshold
+            not sentiment_result["confident"]):
             emotion_result = self.analyze_emotion(text)
+        else:
+            # For confident positive/neutral sentiment, skip emotion analysis
+            emotion_result = {
+                "emotion": None,
+                "score": 0.0,
+                "confident": False,
+                "threshold": self.emotion_threshold,
+                "raw_probabilities": {}
+            }
         
         return {
-            "sentiment": sentiment_result["sentiment"],
-            "sentiment_score": sentiment_result["score"],
-            "emotion": emotion_result["emotion"] if emotion_result else None,
-            "emotion_score": emotion_result["score"] if emotion_result else None,
-            "text": text
+            "text": text,
+            "model": self.name,
+            "sentiment": {
+                "label": sentiment_result["sentiment"],
+                "score": sentiment_result["score"],
+                "confident": sentiment_result["confident"],
+                "threshold": sentiment_result["threshold"],
+                "raw_probabilities": sentiment_result["raw_probabilities"]
+            },
+            "emotion": {
+                "label": emotion_result["emotion"],
+                "score": emotion_result["score"],
+                "confident": emotion_result["confident"],
+                "threshold": emotion_result["threshold"],
+                "raw_probabilities": emotion_result["raw_probabilities"]
+            },
+            "confidence": max(sentiment_result["score"], emotion_result.get("score", 0.0))
+        }
+    
+    def get_model_info(self) -> Dict[str, Any]:
+        """
+        Get information about this model for display in comparison results.
+        
+        Returns:
+            Dictionary with model metadata
+        """
+        return {
+            "name": self.name,
+            "sentiment_model": self.sentiment_model_id,
+            "emotion_model": self.emotion_model_id,
+            "device": self.device,
+            "sentiment_threshold": self.sentiment_threshold,
+            "emotion_threshold": self.emotion_threshold,
+            "local_model": bool(self.local_model_path)
         }
