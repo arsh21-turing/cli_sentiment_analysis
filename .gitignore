@@ -1,0 +1,72 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+dist/
+build/
+.eggs/
+*.egg-info/
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Jupyter Notebook checkpoints and kernels
+.ipynb_checkpoints/
+
+# IDE / editor directories and files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# MyPy / Pyre / other static analysis caches
+.mypy_cache/
+.pyre/
+
+# pytest cache
+tests/.pytest_cache/
+.pytest_cache/
+
+# Coverage reports
+htmlcov/
+.coverage
+*.cover
+
+# Logs and local data
+*.log
+*.pot
+*.po
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Model / dataset caches
+*.h5
+*.onnx
+*.pt
+*.pkl
+cache/
+model_cache/
+
+# Generated artifacts
+*.svg
+*.pdf
+*.png
+
+# Env files
+*.env
+
+# Build system artifacts
+__pypackages__/
+
+# Misc
+*.swp
+*~ 

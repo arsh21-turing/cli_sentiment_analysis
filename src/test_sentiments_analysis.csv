@@ -1,0 +1,11 @@
+text,sentiment,sentiment_score,emotion,emotion_score
+I love this amazing project!,positive,0.9337371587753296,,
+This is absolutely terrible and I hate it.,negative,0.9722745418548584,sadness,0.9882413744926453
+The weather is nice today.,positive,0.25808975100517273,,
+I'm so angry about this situation.,negative,0.5319181084632874,anger,0.9980455636978149
+I'm feeling really happy today.,positive,0.6388601660728455,,
+This makes me very sad.,negative,0.5335953235626221,sadness,0.9985448122024536
+I'm surprised by the results.,positive,0.23731663823127747,,
+I'm afraid of what might happen.,negative,0.15195277333259583,fear,0.9972317814826965
+I love spending time with my family.,positive,0.65911465883255,,
+This product is disappointing.,negative,0.44810929894447327,sadness,0.9983245730400085
