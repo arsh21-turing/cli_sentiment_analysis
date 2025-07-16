@@ -76,6 +76,14 @@ class Settings:
         self._summary_only: bool = False
         self._quiet_mode: bool = False
         self._json_stream: bool = False
+        self._show_stats: bool = False
+        
+        # Fallback system defaults
+        self.use_fallback: bool = False
+        self.always_fallback: bool = False
+        self.show_fallback_details: bool = False
+        self.fallback_threshold: float = 0.35
+        self.fallback_strategy: str = 'weighted'
 
         if config_file:
             self.load_settings(config_file)
@@ -126,6 +134,10 @@ class Settings:
     @property
     def summary_only(self) -> bool:  # noqa: D401
         return self._summary_only
+    
+    @summary_only.setter
+    def summary_only(self, value: bool) -> None:
+        self._summary_only = bool(value)
 
     # ------------------------------------------------------------------
     # Quiet-mode helpers
@@ -150,6 +162,26 @@ class Settings:
     @property
     def json_stream(self) -> bool:  # noqa: D401
         return self._json_stream
+    
+    @json_stream.setter
+    def json_stream(self, value: bool) -> None:
+        self._json_stream = bool(value)
+
+    # ------------------------------------------------------------------
+    # Stats helpers
+    # ------------------------------------------------------------------
+    def set_show_stats(self, show_stats: bool) -> "Settings":
+        """Enable or disable text statistics display."""
+        self._show_stats = bool(show_stats)
+        return self
+
+    @property
+    def show_stats(self) -> bool:  # noqa: D401
+        return self._show_stats
+    
+    @show_stats.setter
+    def show_stats(self, value: bool) -> None:
+        self._show_stats = bool(value)
 
     # ------------------------------------------------------------------
     # Colour helpers
@@ -162,7 +194,15 @@ class Settings:
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
-    def load_settings(self, file_path: str) -> "Settings":
+    def load_settings(self, file_path: Optional[str] = None) -> "Settings":
+        # Resolve path
+        if file_path is None:
+            file_path = self.get_config_path()
+
+        if file_path is None:
+            # Nothing to load – keep defaults
+            return self
+
         try:
             with open(file_path, "r", encoding="utf-8") as f:
                 data: Dict[str, Any] = json.load(f)
@@ -187,10 +227,28 @@ class Settings:
 
         if isinstance(data.get("color_scheme"), dict):
             self.color_scheme.update(data["color_scheme"])
+        
+        # Load fallback settings
+        self.use_fallback = data.get("use_fallback", self.use_fallback)
+        self.always_fallback = data.get("always_fallback", self.always_fallback)
+        self.show_fallback_details = data.get("show_fallback_details", self.show_fallback_details)
+        
+        if "fallback_threshold" in data:
+            self.set_fallback_threshold(float(data["fallback_threshold"]))
+        if "fallback_strategy" in data:
+            self.set_fallback_strategy(data["fallback_strategy"])
+        
+        # Load display settings
+        self._show_stats = data.get("show_stats", self._show_stats)
+            
         return self
 
     def save_settings(self, file_path: Optional[str] = None) -> bool:
-        path = file_path or os.path.expanduser("~/.sentiment_cli_settings.json")
+        if file_path is None:
+            cfg_path = self.get_config_path() or os.path.expanduser("~/.sentiment_cli_settings.json")
+            path = cfg_path
+        else:
+            path = file_path
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
@@ -201,6 +259,12 @@ class Settings:
                         "sentiment_threshold_levels": self.sentiment_threshold_levels,
                         "emotion_threshold_levels": self.emotion_threshold_levels,
                         "color_scheme": self.color_scheme,
+                        "use_fallback": self.use_fallback,
+                        "always_fallback": self.always_fallback,
+                        "show_fallback_details": self.show_fallback_details,
+                        "fallback_threshold": self.fallback_threshold,
+                        "fallback_strategy": self.fallback_strategy,
+                        "show_stats": self._show_stats,
                     },
                     f,
                     indent=4,
@@ -248,4 +312,83 @@ class Settings:
         import os as _os
         if _os.getenv("ANSI_COLORS_DISABLED") == "1":
             return False
-        return getattr(Fore, "GREEN", "") != "" 
+        return getattr(Fore, "GREEN", "") != ""
+    
+    # ------------------------------------------------------------------
+    # Fallback system settings
+    # ------------------------------------------------------------------
+    def get_fallback_threshold(self) -> float:
+        """Get the threshold for triggering fallback system."""
+        return getattr(self, 'fallback_threshold', 0.35)
+    
+    def set_fallback_threshold(self, threshold: float) -> "Settings":
+        """Set the threshold for triggering fallback system."""
+        if self._valid_threshold(threshold):
+            self.fallback_threshold = threshold
+        return self
+    
+    def get_fallback_strategy(self) -> str:
+        """Get the conflict resolution strategy."""
+        return getattr(self, 'fallback_strategy', 'weighted')
+    
+    def set_fallback_strategy(self, strategy: str) -> "Settings":
+        """Set the conflict resolution strategy."""
+        valid_strategies = ['weighted', 'highest_confidence', 'primary_first', 'fallback_first']
+        if strategy in valid_strategies:
+            self.fallback_strategy = strategy
+        return self
+    
+    def set_fallback_enabled(self, enabled: bool) -> "Settings":
+        """Enable or disable the fallback system."""
+        self.use_fallback = enabled
+        return self
+    
+    def set_always_fallback(self, always: bool) -> "Settings":
+        """Set whether to always use fallback regardless of confidence."""
+        self.always_fallback = always
+        return self
+    
+    def set_show_fallback_details(self, show: bool) -> "Settings":
+        """Set whether to show detailed fallback information."""
+        self.show_fallback_details = show
+        return self
+    
+    def get_config_path(self) -> Optional[str]:
+        """Get the path to the configuration file."""
+        return getattr(self, '_config_path', None)
+    
+    def set_summary_only(self, summary: bool) -> "Settings":
+        """Set summary-only mode."""
+        self.summary_only = summary
+        return self
+    
+    def set_json_stream(self, json_stream: bool) -> "Settings":
+        """Set JSON stream mode."""
+        self.json_stream = json_stream
+        return self 
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers required by legacy CLI tests
+    # ------------------------------------------------------------------
+    def is_fallback_enabled(self) -> bool:  # noqa: D401
+        """Return whether the intelligent fallback system is currently active."""
+        return bool(getattr(self, "use_fallback", False))
+
+    def get(self, path: str, default: Any = None) -> Any:  # noqa: D401
+        """Light-weight dotted-path getter (~Config.get) for tests.
+
+        This is *not* a full replacement for the real configuration system – it
+        merely covers the handful of keys accessed by the test-suite (e.g.
+        ``fallback.strategy``).  If the key does not exist we fall back to
+        *default*.
+        """
+        parts = path.split(".")
+        current: Any = self.__dict__
+        for part in parts:
+            if isinstance(current, dict) and part in current:
+                current = current[part]
+            elif hasattr(current, part):
+                current = getattr(current, part)
+            else:
+                return default
+        return current 

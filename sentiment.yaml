@@ -1,0 +1,80 @@
+# Sentiment Analysis Configuration
+# This file configures all aspects of the sentiment analysis tool
+
+# Model configuration
+models:
+  # Primary transformer model settings
+  transformer:
+    sentiment_model: nlptown/bert-base-multilingual-uncased-sentiment
+    emotion_model: bhadresh-savani/distilbert-base-uncased-emotion
+    local_model_path: null  # Path to local model files, null to use HuggingFace
+    device: auto  # auto, cpu, cuda, or mps
+  
+  # Groq API settings
+  groq:
+    model: llama2-70b-4096  # Available models: llama2-70b-4096, mixtral-8x7b-32768, gemma-7b-it
+    # api_key: your_api_key_here  # Uncomment to set API key, or use SENTIMENT_MODELS__GROQ__API_KEY env var
+    timeout: 30  # Request timeout in seconds
+    max_retries: 3  # Number of retries for failed requests
+    cache: true  # Enable response caching
+    cache_size: 100  # Maximum number of cached responses
+
+# Confidence thresholds
+thresholds:
+  sentiment: 0.5  # Minimum confidence for sentiment predictions
+  emotion: 0.4  # Minimum confidence for emotion predictions
+  fallback: 0.35  # Threshold for triggering fallback system
+  
+  # Multi-level thresholds for detailed confidence reporting
+  sentiment_levels:
+    high: 0.8
+    medium: 0.6
+    low: 0.4
+  
+  emotion_levels:
+    high: 0.7
+    medium: 0.5
+    low: 0.3
+
+# Fallback system configuration
+fallback:
+  enabled: false  # Enable the fallback system
+  always_use: false  # Always use fallback regardless of confidence
+  strategy: weighted  # Options: weighted, highest_confidence, primary_first, fallback_first
+  show_details: false  # Show fallback process details in output
+  weighted_primary_factor: 0.7  # Factor for primary model in weighted strategy (0.0-1.0)
+  conflict_threshold: 0.1  # Threshold for detecting conflicting emotions
+
+# Output formatting
+output:
+  format: text  # Options: text, json, json_stream
+  color: auto  # Options: auto, always, never
+  quiet: false  # Suppress informational messages
+  summary_only: false  # Show only summary line
+  show_probabilities: false  # Show raw probability distributions
+  emoji: true  # Use emoji in text output
+  detailed: true  # Show detailed descriptions
+
+# Text preprocessing options
+preprocessing:
+  remove_urls: true  # Remove URLs from text
+  remove_html: true  # Remove HTML tags from text
+  fix_encoding: true  # Fix common encoding issues
+  handle_emojis: keep  # Options: keep, remove, replace
+  lowercase: true  # Convert text to lowercase
+
+# Logging configuration
+logging:
+  level: INFO  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: null  # Log file path, null for console only
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Advanced settings
+advanced:
+  batch_size: 16  # Batch size for processing multiple texts
+  use_cuda: auto  # Options: auto, yes, no
+  use_mps: auto  # Options: auto, yes, no (Apple Silicon)
+  export_format: csv  # Default export format for batch processing
+  temp_dir: null  # Temporary directory for exports
+  cache_dir: null  # Cache directory for models
+  max_length: 512  # Maximum sequence length for transformer models 

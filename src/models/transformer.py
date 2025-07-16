@@ -35,15 +35,40 @@ class SentimentEmotionTransformer:
 
     def __init__(
         self,
-        sentiment_model: str = DEFAULT_SENTIMENT_MODEL,
-        emotion_model: str = DEFAULT_EMOTION_MODEL,
-        sentiment_threshold: float = 0.7,
-        emotion_threshold: float = 0.6,
+        sentiment_model: str = None,
+        emotion_model: str = None,
+        sentiment_threshold: float = None,
+        emotion_threshold: float = None,
         local_model_path: Optional[str] = None,
         name: Optional[str] = None,
+        config: Optional[object] = None,
         **kwargs,
     ) -> None:
         """Constructor accepts flexible keyword aliases used in test-suite."""
+        
+        # Get configuration
+        from ..config import get_config
+        
+        if config is None:
+            config = get_config()
+        
+        # Extract configuration values
+        transformer_config = config.get_transformer_config() if hasattr(config, 'get_transformer_config') else config.get('models', {}).get('transformer', {})
+        threshold_config = config.get_thresholds() if hasattr(config, 'get_thresholds') else config.get('thresholds', {})
+        
+        # Use config defaults if parameters not provided
+        if sentiment_model is None:
+            sentiment_model = transformer_config.get('sentiment_model', self.DEFAULT_SENTIMENT_MODEL)
+        if emotion_model is None:
+            emotion_model = transformer_config.get('emotion_model', self.DEFAULT_EMOTION_MODEL)
+        if sentiment_threshold is None:
+            sentiment_threshold = threshold_config.get('sentiment', 0.7)
+        if emotion_threshold is None:
+            emotion_threshold = threshold_config.get('emotion', 0.6)
+        if local_model_path is None:
+            local_model_path = transformer_config.get('local_model_path')
+        if name is None:
+            name = transformer_config.get('name', "SentimentEmotionTransformer")
 
         # Support alias parameter names used by tests (sentiment_model_name etc.)
         if 'sentiment_model_name' in kwargs:
@@ -82,6 +107,9 @@ class SentimentEmotionTransformer:
             handle_emojis='keep',
             lowercase=True,
         )
+
+        # Fallback system for low-confidence predictions
+        self._fallback_system = None
 
         # ------------------------------------------------------------------
         # Model / pipeline loading
@@ -250,7 +278,7 @@ class SentimentEmotionTransformer:
             "raw_probabilities": {},
         }
     
-    def analyze(self, text: str) -> Dict[str, Any]:
+    def analyze(self, text: str, use_fallback: Optional[bool] = None) -> Dict[str, Any]:
         """
         Perform complete sentiment and emotion analysis on the given text.
         
@@ -260,10 +288,17 @@ class SentimentEmotionTransformer:
         
         Args:
             text: The input text to analyze
+            use_fallback: Override to use or not use fallback (None follows settings)
             
         Returns:
             Dictionary with combined sentiment and emotion analysis results
         """
+        # Check if we should use fallback system
+        if self._fallback_system and (use_fallback is True or 
+            (use_fallback is None and 
+             (self.settings and hasattr(self.settings, 'use_fallback') and self.settings.use_fallback))):
+            return self._fallback_system.analyze(text)
+        
         sentiment_result = self.analyze_sentiment(text)
         
         # Only analyze emotion for negative sentiment or if not confident in positive/neutral
@@ -282,15 +317,74 @@ class SentimentEmotionTransformer:
         
         emotion_score_val = emotion_result["score"] if emotion_result["score"] is not None else 0.0
 
-        return {
+        # Format results to match expected structure for fallback system
+        result = {
+            "sentiment": {
+                "label": sentiment_result["sentiment"],
+                "score": sentiment_result["score"],
+                "raw_probabilities": sentiment_result.get("raw_probabilities", {})
+            },
+            "emotion": {
+                "label": emotion_result["emotion"],
+                "score": emotion_result["score"] if emotion_result["score"] is not None else 0.0,
+                "raw_probabilities": emotion_result.get("raw_probabilities", {})
+            },
             "text": text,
-            "sentiment": sentiment_result["sentiment"],
-            "sentiment_score": sentiment_result["score"],
-            "emotion": emotion_result["emotion"],
-            "emotion_score": emotion_result["score"],
             "confidence": max(sentiment_result["score"], emotion_score_val),
         }
+
+        return result
     
+    def set_fallback_system(self, fallback_system):
+        """
+        Set the fallback system for low-confidence predictions.
+        
+        Args:
+            fallback_system: FallbackSystem instance
+            
+        Returns:
+            Self for method chaining
+        """
+        self._fallback_system = fallback_system
+        return self
+    
+    def remove_fallback_system(self):
+        """
+        Remove the fallback system to disable fallback.
+        
+        Returns:
+            Self for method chaining
+        """
+        self._fallback_system = None
+        return self
+        
+    def get_confidence_metrics(self, result: Dict[str, Any]) -> Dict[str, float]:
+        """
+        Extract confidence metrics from result for evaluation.
+        
+        Args:
+            result: Analysis result
+            
+        Returns:
+            Dict with confidence metrics
+        """
+        metrics = {}
+        
+        if "sentiment" in result:
+            metrics["sentiment_confidence"] = result["sentiment"]["score"]
+            
+        if "emotion" in result:
+            metrics["emotion_confidence"] = result["emotion"]["score"]
+            
+        if "sentiment" in result and "emotion" in result:
+            # Calculate an overall confidence metric
+            metrics["overall_confidence"] = (
+                metrics["sentiment_confidence"] * 0.5 + 
+                metrics["emotion_confidence"] * 0.5
+            )
+            
+        return metrics
+
     def get_model_info(self) -> Dict[str, Any]:
         """
         Get information about this model for display in comparison results.
@@ -305,5 +399,6 @@ class SentimentEmotionTransformer:
             "device": self.device,
             "sentiment_threshold": self.sentiment_threshold,
             "emotion_threshold": self.emotion_threshold,
-            "local_model": bool(self.local_model_path)
+            "local_model": bool(self.local_model_path),
+            "has_fallback": bool(self._fallback_system)
         }
