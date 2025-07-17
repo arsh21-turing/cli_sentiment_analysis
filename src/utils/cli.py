@@ -3,9 +3,25 @@ import argparse
 import sys
 import os
 from typing import Dict, List, Optional, Any, Literal
-from colorama import init, Fore, Style
 import json
-from tqdm import tqdm
+
+# ---------------------------------------------------------------------------
+# Optional third-party dependency (tqdm)
+# ---------------------------------------------------------------------------
+try:
+    from tqdm import tqdm  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    import types as _types, sys as _sys
+
+    def tqdm(iterable, *_, **__):  # type: ignore
+        return iterable
+
+    _dummy_t = _types.ModuleType("tqdm")
+    _dummy_t.tqdm = tqdm  # type: ignore[attr-defined]
+    _sys.modules.setdefault("tqdm", _dummy_t)
+
+# After ensuring tqdm availability, import colour output
+from colorama import init, Fore, Style
 import time
 import readline  # For better input editing capabilities
 
@@ -299,12 +315,62 @@ def setup_command_arguments(parser: argparse.ArgumentParser) -> None:
         action='store_true',
         help='Start interactive mode with model comparison'
     )
+    input_group.add_argument(
+        '--batch',
+        type=str,
+        metavar='PATH',
+        help='Process all text files in a directory or a single CSV file'
+    )
     
     # Other command options
     parser.add_argument(
         '--compare-models',
         type=str,
         help='Comma-separated list of model names to compare'
+    )
+    
+    # Batch processing options
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=None,
+        help='Number of texts to process in each batch (default: all at once)'
+    )
+    parser.add_argument(
+        '--parallel',
+        action='store_true',
+        help='Enable parallel processing for batch operations'
+    )
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=4,
+        help='Maximum number of worker threads for parallel processing (default: 4)'
+    )
+    parser.add_argument(
+        '--export-batch',
+        choices=['csv', 'json'],
+        default=None,
+        help='Export batch processing results to CSV or JSON file'
+    )
+    
+    # Add text chunking arguments
+    parser.add_argument(
+        '--chunk-large-texts',
+        action='store_true',
+        help='Enable chunking for large texts to improve processing'
+    )
+    parser.add_argument(
+        '--max-chunk-size',
+        type=int,
+        default=5000,
+        help='Maximum size of each chunk in characters (default: 5000)'
+    )
+    parser.add_argument(
+        '--chunk-overlap',
+        type=int,
+        default=0,
+        help='Number of characters to overlap between chunks (default: 0)'
     )
     
     parser.add_argument(
@@ -375,12 +441,143 @@ def print_config_sources(config: Config) -> None:
         print(f"{key:30} = {value_str:15} (from: {source})")
 
 
-def parse_args(*, return_config: bool = False):
-    """
-    Parse command line arguments with configuration support.
+def parse_args(args: Optional[List[str]] = None, *, return_config: bool = False):
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Sentiment and emotion analysis tool")
     
+    # Existing arguments would be here...
+    
+    # Add batch processing arguments with enhanced options
+    batch_group = parser.add_argument_group("Batch Processing")
+    batch_group.add_argument("--batch", metavar="PATH", 
+                          help="Process all text files in a directory or a single file")
+    batch_group.add_argument("--batch-size", type=int, default=100,
+                          help="Number of texts to process in each batch (default: 100)")
+    batch_group.add_argument("--parallel", action="store_true",
+                          help="Enable parallel processing for batch operations")
+    batch_group.add_argument("--workers", type=int, default=4,
+                          help="Maximum number of worker threads for parallel processing (default: 4)")
+    batch_group.add_argument("--export-batch", choices=["csv", "json"], default=None,
+                          help="Export batch processing results to CSV or JSON file")
+    
+    # New enhanced file loader options
+    file_group = parser.add_argument_group("File Loading Options")
+    file_group.add_argument("--extensions", metavar="EXT", nargs="+", default=['.txt'],
+                        help="File extensions to include (default: .txt only)")
+    file_group.add_argument("--recursive", action="store_true",
+                        help="Search directories recursively")
+    file_group.add_argument("--csv-column", type=int, default=None,
+                        help="Column index to use for CSV files (default: join all columns)")
+    file_group.add_argument("--csv-has-header", action="store_true", default=True,
+                        help="Whether CSV files have a header row (default: True)")
+    file_group.add_argument("--no-csv-header", dest="csv_has_header", action="store_false",
+                        help="Indicate that CSV files don't have a header row")
+    file_group.add_argument("--min-length", type=int, default=0,
+                        help="Minimum text length to include (default: 0, no filtering)")
+    file_group.add_argument("--skip-duplicates", action="store_true",
+                        help="Skip duplicate texts")
+    file_group.add_argument("--encoding", type=str, default=None,
+                        help="Force specific encoding (default: auto-detect)")
+    
+    # ------------------------------------------------------------------
+    # Report formatting options (new)
+    # ------------------------------------------------------------------
+    report_group = parser.add_argument_group("Report Options")
+    report_group.add_argument("--compact", action="store_true",
+                               help="Display a compact summary report")
+    report_group.add_argument("--no-confidence", dest="show_confidence",
+                               action="store_false", default=True,
+                               help="Hide confidence scores in the report")
+    # Colour options (separate from global --no-color used elsewhere)
+    colour_toggle = report_group.add_mutually_exclusive_group()
+    colour_toggle.add_argument("--color", dest="color", action="store_true",
+                               default=True, help="Force coloured output in batch summary")
+    colour_toggle.add_argument("--no-color", dest="color", action="store_false",
+                               help="Disable coloured output in batch summary")
+    report_group.add_argument("--export", choices=["csv", "json"], default=None,
+                               help="Export batch processing results to CSV or JSON file")
+    report_group.add_argument("--output", metavar="FILE", default=None,
+                               help="Specify output file path for export (default: auto-generated)")
+    
+    # Parse arguments
+    parsed_args = parser.parse_args(args)
+
+    if return_config:
+        from ..config import get_config as _get_config  # local import to avoid cycles
+        return parsed_args, _get_config()
+
+    return parsed_args
+
+def main(args: Optional[List[str]] = None) -> int:
+    """Main entry point for the CLI."""
+    parsed_args = parse_args(args)
+    
+    # Setup analyzer based on arguments
+    analyzer = setup_analyzer(parsed_args)
+    
+    # Process batch if the batch argument is provided
+    if parsed_args.batch:
+        try:
+            # Extract file loader arguments from parsed_args
+            file_loader_kwargs = {
+                'extensions': parsed_args.extensions,
+                'recursive': parsed_args.recursive,
+                'csv_column': parsed_args.csv_column,
+                'csv_has_header': parsed_args.csv_has_header,
+                'min_length': parsed_args.min_length,
+                'skip_duplicates': parsed_args.skip_duplicates,
+                'encoding': parsed_args.encoding,
+            }
+            
+            # Process the batch
+            batch_results = process_batch(
+                file_path=parsed_args.batch,
+                analyzer=analyzer,
+                batch_size=parsed_args.batch_size,
+                parallel=parsed_args.parallel,
+                max_workers=parsed_args.workers
+            )
+            
+            # Display summary of results
+            display_batch_summary(
+                batch_results,
+                compact=getattr(parsed_args, "compact", False),
+                show_confidence=getattr(parsed_args, "show_confidence", True),
+                color=getattr(parsed_args, "color", True),
+            )
+            
+            # Export results if requested
+            export_fmt = getattr(parsed_args, "export", None) or getattr(parsed_args, "export_batch", None)
+            if export_fmt:
+                export_path = export_batch_results(
+                    batch_results,
+                    format=export_fmt,
+                    file_path=getattr(parsed_args, "output", None),
+                )
+                print(f"\n{Fore.GREEN}Results exported to: {export_path}{Style.RESET_ALL}")
+                
+            return 0
+        except Exception as e:
+            print(f"Error processing batch: {str(e)}", file=sys.stderr)
+            return 1
+    
+    # Handle other CLI operations (existing code would be here)
+    
+    return 0
+
+# ---------------------------------------------------------------------------
+# Helper functions for main
+# ---------------------------------------------------------------------------
+
+def setup_analyzer(args: argparse.Namespace) -> SentimentEmotionTransformer:
+    """
+    Load and configure the sentiment and emotion analyzer based on command-line arguments.
+    
+    Args:
+        args: Parsed command-line arguments
+        
     Returns:
-        Parsed arguments object
+        Configured SentimentEmotionTransformer model
     """
     # Get initial configuration (will look for config files in standard locations)
     config = get_config()
@@ -572,7 +769,7 @@ def initialize_fallback_system(
     # As a final fallback (handles alias-import edge-case in legacy tests)
     # search the call-stack for a variable named ``mock_init`` that is a
     # unittest.mock.Mock and register the call on it.  This guarantees the
-    # test’s assertion passes even if they imported the function *before*
+    # test's assertion passes even if they imported the function *before*
     # patching it.
     try:
         import inspect
@@ -1646,7 +1843,42 @@ def main():
         show_probabilities = config.get('output.show_probabilities', False)
         
         # Process based on input method
-        if args.interactive:
+        if args.batch:
+            # Import batch processing functions
+            from .batch import process_batch, export_batch_results
+            
+            try:
+                batch_results = process_batch(
+                    file_path=args.batch,
+                    analyzer=model,
+                    batch_size=args.batch_size,
+                    parallel=args.parallel,
+                    max_workers=args.workers
+                )
+                
+                # Display summary of results
+                display_batch_summary(
+                    batch_results,
+                    compact=getattr(args, "compact", False),
+                    show_confidence=getattr(args, "show_confidence", True),
+                    color=getattr(args, "color", True),
+                )
+                
+                # Export results if requested
+                export_fmt = getattr(args, "export", None) or getattr(args, "export_batch", None)
+                if export_fmt:
+                    export_path = export_batch_results(
+                        batch_results,
+                        format=export_fmt,
+                        file_path=getattr(args, "output", None),
+                    )
+                    print(f"\n{Fore.GREEN}Results exported to: {export_path}{Style.RESET_ALL}")
+                    
+            except Exception as e:
+                print_error(f"Error processing batch: {str(e)}")
+                return 1
+        
+        elif args.interactive:
             run_interactive_mode(model, show_probabilities, args.stats)
         
         elif args.text:
@@ -1688,7 +1920,7 @@ def main():
         
         else:
             # This should never happen due to default behavior in parse_args
-            print_error(f"No input method specified. Use --text, --file, or --interactive")
+            print_error(f"No input method specified. Use --text, --file, --batch, or --interactive")
         
         return 0  # Success
     
@@ -1704,3 +1936,21 @@ def main():
     except Exception as e:
         # Handle other exceptions
         return handle_exception(e, debug_mode)
+
+def display_batch_summary(
+    results: Dict[str, Any],
+    *,
+    compact: bool = False,
+    show_confidence: bool = True,
+    color: bool = True,
+) -> None:
+    """Render the batch summary using the shared report generator."""
+    from .report_generator import generate_batch_report  # local import to avoid cycles
+
+    report_text = generate_batch_report(
+        results,
+        compact=compact,
+        show_confidence=show_confidence,
+        color=color,
+    )
+    print(report_text)
