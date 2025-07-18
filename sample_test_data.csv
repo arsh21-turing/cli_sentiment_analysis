@@ -1,0 +1,11 @@
+text,sentiment,emotion
+This is a great product!,positive,joy
+I love this service.,positive,joy
+This is terrible quality.,negative,sadness
+I'm so happy with the results.,positive,joy
+This makes me sad.,negative,sadness
+The food was delicious.,positive,joy
+I hate this place.,negative,anger
+Amazing experience!,positive,joy
+Very disappointed.,negative,sadness
+Wonderful service!,positive,joy
