@@ -4,6 +4,7 @@ import sys
 import os
 from typing import Dict, List, Optional, Any, Literal
 from colorama import init, Fore, Style
+import json
 from tqdm import tqdm
 import time
 import readline  # For better input editing capabilities
@@ -16,6 +17,79 @@ from .output import (
     export_to_json, 
     export_to_csv
 )
+from .settings import Settings  # new import for settings management
+from .labels import LabelMapper
+
+# Global quiet mode flag
+QUIET_MODE = False # noqa: PLW0603
+
+# ---------------------------------------------------------------------------
+# Helper print wrappers usable across module
+# ---------------------------------------------------------------------------
+
+from typing import Any as _Any
+
+
+def info_print(msg: str, *, end: str = "\n", file: _Any = sys.stdout):  # noqa: D401
+    if not QUIET_MODE:
+        print(msg, end=end, file=file)
+
+
+def print_error(msg: str):  # noqa: D401
+    print(f"{Fore.RED}{msg}{Style.RESET_ALL}", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# JSON stream helper
+# ---------------------------------------------------------------------------
+
+
+def format_result_as_json(result: Dict[str, Any], *, include_probabilities: bool = False, text: Optional[str] = None) -> str:  # noqa: D401
+    """Convert a single analysis *result* into a compact JSON string suitable for NDJSON output."""
+
+    payload: Dict[str, Any] = {}
+
+    if text is not None:
+        payload["text"] = text
+    elif "text" in result:
+        payload["text"] = result["text"]
+
+    # Handle sentiment - support both nested dict and flat structure
+    if "sentiment" in result:
+        if isinstance(result["sentiment"], dict):
+            # Nested structure: {"sentiment": {"label": "positive", "score": 0.9}}
+            sent_obj = {
+                "label": result["sentiment"].get("label", ""),
+                "score": result["sentiment"].get("score", 0.0),
+            }
+            if include_probabilities and "raw_probabilities" in result["sentiment"]:
+                sent_obj["probabilities"] = result["sentiment"].get("raw_probabilities", {})
+        else:
+            # Flat structure: {"sentiment": "positive", "sentiment_score": 0.9}
+            sent_obj = {
+                "label": result["sentiment"],
+                "score": result.get("sentiment_score", 0.0),
+            }
+        payload["sentiment"] = sent_obj
+
+    # Handle emotion - support both nested dict and flat structure
+    if "emotion" in result:
+        if isinstance(result["emotion"], dict):
+            # Nested structure: {"emotion": {"label": "joy", "score": 0.8}}
+            emo_obj = {
+                "label": result["emotion"].get("label", ""),
+                "score": result["emotion"].get("score", 0.0),
+            }
+            if include_probabilities and "raw_probabilities" in result["emotion"]:
+                emo_obj["probabilities"] = result["emotion"].get("raw_probabilities", {})
+        else:
+            # Flat structure: {"emotion": "joy", "emotion_score": 0.8}
+            emo_obj = {
+                "label": result["emotion"],
+                "score": result.get("emotion_score", 0.0),
+            }
+        payload["emotion"] = emo_obj
+
+    return json.dumps(payload, ensure_ascii=False)
 
 def parse_args():
     """
@@ -74,13 +148,13 @@ def parse_args():
         "--sentiment-threshold", 
         type=float, 
         default=0.7,
-        help="Confidence threshold for sentiment predictions (0.0-1.0)"
+        help=f"Confidence threshold for sentiment predictions (0.0-1.0, default: {Settings().get_sentiment_threshold()})"
     )
     model_group.add_argument(
         "--emotion-threshold", 
         type=float, 
         default=0.6,
-        help="Confidence threshold for emotion predictions (0.0-1.0)"
+        help=f"Confidence threshold for emotion predictions (0.0-1.0, default: {Settings().get_emotion_threshold()})"
     )
     model_group.add_argument(
         "--compare-models",
@@ -112,6 +186,34 @@ def parse_args():
         default="text",
         help="Output format for saving results (text, json, csv, or all)"
     )
+    output_group.add_argument(
+        "--quiet", "-q",
+        action="store_true",
+        help="Suppress progress bars and informational messages; only final results are printed",
+    )
+    output_group.add_argument(
+        "--no-colour", "--no-color", "-nc",
+        action="store_true",
+        help="Disable ANSI colour codes in output (useful for redirecting output)",
+    )
+    output_group.add_argument(
+        "--summary-only", "-s",
+        action="store_true",
+        help="Print only the single-line sentiment + emotion summary",
+    )
+
+    output_group.add_argument(
+        "--json-stream", "-j",
+        action="store_true",
+        help="Output each analysis as a JSON line (NDJSON) to stdout",
+    )
+    
+    # Global settings options
+    parser.add_argument(
+        "--reset-settings",
+        action="store_true",
+        help="Reset all saved settings back to their defaults and exit",
+    )
     
     args = parser.parse_args()
     
@@ -127,7 +229,8 @@ def load_transformer_model(
     sentiment_threshold: float,
     emotion_threshold: float,
     local_model_path: Optional[str] = None,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    settings: Optional[Settings] = None,
 ) -> SentimentEmotionTransformer:
     """
     Load a transformer model with the specified parameters.
@@ -135,14 +238,16 @@ def load_transformer_model(
     Args:
         sentiment_model: Sentiment model identifier
         emotion_model: Emotion model identifier
-        confidence_threshold: Confidence threshold for predictions
+        sentiment_threshold: Sentiment threshold
+        emotion_threshold: Emotion threshold
         local_model_path: Optional path to locally saved models
         model_name: Optional custom name for the model
+        settings: Optional settings object
         
     Returns:
         Initialized SentimentEmotionTransformer model
     """
-    print(f"{Fore.BLUE}Loading model {model_name or sentiment_model}...{Style.RESET_ALL}")
+    info_print(f"Loading model {model_name or sentiment_model}...")
     
     try:
         model = SentimentEmotionTransformer(
@@ -151,13 +256,19 @@ def load_transformer_model(
             sentiment_threshold=sentiment_threshold,
             emotion_threshold=emotion_threshold,
             local_model_path=local_model_path,
-            name=model_name
+            name=model_name,
         )
-        print(f"{Fore.GREEN}Model loaded successfully!{Style.RESET_ALL}")
+        
+        # Attach settings to the model if provided
+        if settings is not None:
+            model.settings = settings
+        
+        info_print("Model loaded successfully!")
         return model
+    
     except Exception as e:
-        print(f"{Fore.RED}Error loading model: {e}{Style.RESET_ALL}")
-        raise
+        print_error(f"Failed to load model: {e}")
+        sys.exit(1)
 
 def load_comparison_models(args) -> List[SentimentEmotionTransformer]:
     """
@@ -178,7 +289,7 @@ def load_comparison_models(args) -> List[SentimentEmotionTransformer]:
         args.sentiment_threshold,
         args.emotion_threshold,
         args.local_model_path,
-        name=args.model_name or "Default"
+        name=args.model_name or "Default",
     )
     models.append(default_model)
     
@@ -232,11 +343,11 @@ def load_comparison_models(args) -> List[SentimentEmotionTransformer]:
                     sentiment_threshold,
                     emotion_threshold,
                     args.local_model_path,
-                    name=name
+                    name=name,
                 )
                 models.append(model)
             except Exception as e:
-                print(f"{Fore.RED}Error loading comparison model {name}: {e}{Style.RESET_ALL}")
+                print_error(f"Error loading comparison model {name}: {e}")
     
     return models
 
@@ -321,7 +432,15 @@ def analyze_text(
         Tuple of (analysis result dictionary, formatted result string)
     """
     result = model.analyze(text)
-    formatted = format_analysis_result(result, show_probabilities)
+
+    # Attach original text for downstream usage
+    result.setdefault("text", text)
+
+    if getattr(model.settings, "json_stream", False):
+        formatted = format_result_as_json(result, include_probabilities=show_probabilities)
+    else:
+        formatted = format_analysis_result(result, show_probabilities, model.settings)
+
     return result, formatted
 
 def compare_models(
@@ -345,8 +464,15 @@ def compare_models(
     
     comparison = ModelComparison(models)
     result = comparison.compare(text)
-    formatted = comparison.format_comparison(result, show_probabilities)
-    
+
+    json_stream_enabled = hasattr(models[0], "settings") and getattr(models[0].settings, "json_stream", False) is True
+
+    if json_stream_enabled:
+        # Build compact JSON structure
+        formatted = json.dumps(result, ensure_ascii=False)
+    else:
+        formatted = comparison.format_comparison(result, show_probabilities)
+
     return result, formatted
 
 def export_results(
@@ -360,33 +486,33 @@ def export_results(
     if output_format == "text" or output_format == "all":
         text_output = f"{output_file}.txt"
         try:
-            formatted_results = [format_analysis_result(r, True) for r in results]
+            formatted_results = [format_analysis_result(r, True, None) for r in results]
             with open(text_output, 'w', encoding='utf-8') as f:
                 f.write("\n\n".join(formatted_results))
-            print(f"{Fore.GREEN}Results saved to {text_output}{Style.RESET_ALL}")
+            info_print(f"Results saved to {text_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving text results: {e}{Style.RESET_ALL}")
+            info_print(f"Error saving text results: {e}")
 
     if output_format == "json" or output_format == "all":
         json_output = f"{output_file}.json"
         try:
             from .output import export_to_json
             export_to_json(results, json_output)
-            print(f"{Fore.GREEN}Results saved to {json_output}{Style.RESET_ALL}")
+            info_print(f"Results saved to {json_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving JSON results: {e}{Style.RESET_ALL}")
+            info_print(f"Error saving JSON results: {e}")
 
     if output_format == "csv" or output_format == "all":
         csv_output = f"{output_file}.csv"
         try:
             from .output import export_to_csv
             export_to_csv(results, csv_output)
-            print(f"{Fore.GREEN}Results saved to {csv_output}{Style.RESET_ALL}")
+            info_print(f"Results saved to {csv_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving CSV results: {e}{Style.RESET_ALL}")
+            info_print(f"Error saving CSV results: {e}")
 
     if output_format not in ("text", "json", "csv", "all"):
-        print(f"{Fore.RED}Error saving: Unknown format '{output_format}'{Style.RESET_ALL}")
+        info_print(f"Error saving: Unknown format '{output_format}'")
 
 def export_comparison_results(
     comparison_results: list,
@@ -397,7 +523,7 @@ def export_comparison_results(
     Export comparison results in the specified format.
     """
     if not comparison_results:
-        print(f"{Fore.YELLOW}No comparison results to export{Style.RESET_ALL}")
+        info_print("No comparison results to export")
         return
 
     from src.models.comparison import ModelComparison
@@ -414,9 +540,9 @@ def export_comparison_results(
                     f.write(" " + formatted)  # Add leading space
                     if i < len(comparison_results) - 1:
                         f.write("\n\n")
-            print(f"{Fore.GREEN}Comparison results saved to {text_output}{Style.RESET_ALL}")
+            info_print(f"Comparison results saved to {text_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving text comparison results: {e}{Style.RESET_ALL}")
+            print_error(f"Error saving text comparison results: {e}")
 
     if output_format == "json" or output_format == "all":
         json_output = f"{output_file}.json"
@@ -425,9 +551,9 @@ def export_comparison_results(
             with open(json_output, 'w', encoding='utf-8') as f:
                 import json
                 json.dump(serializable, f, indent=2)
-            print(f"{Fore.GREEN}Comparison results saved to {json_output}{Style.RESET_ALL}")
+            info_print(f"Comparison results saved to {json_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving JSON comparison results: {e}{Style.RESET_ALL}")
+            print_error(f"Error saving JSON comparison results: {e}")
 
     if output_format == "csv" or output_format == "all":
         csv_output = f"{output_file}.csv"
@@ -454,12 +580,12 @@ def export_comparison_results(
                             emo_agreement
                         ]
                         writer.writerow(row)
-            print(f"{Fore.GREEN}Comparison results saved to {csv_output}{Style.RESET_ALL}")
+            info_print(f"Comparison results saved to {csv_output}")
         except Exception as e:
-            print(f"{Fore.RED}Error saving CSV comparison results: {e}{Style.RESET_ALL}")
+            print_error(f"Error saving CSV comparison results: {e}")
 
     if output_format not in ("text", "json", "csv", "all"):
-        print(f"{Fore.RED}Error saving: Unknown format '{output_format}'{Style.RESET_ALL}")
+        info_print(f"Error saving: Unknown format '{output_format}'")
 
 def process_batch_file(
     file_path: str,
@@ -485,30 +611,40 @@ def process_batch_file(
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f if line.strip()]
     except Exception as e:
-        print(f"{Fore.RED}Error reading file: {e}{Style.RESET_ALL}")
+        print_error(f"Error reading file: {e}")
         sys.exit(1)
     
     results = []
     formatted_results = []
     
     # Process with progress bar
-    print(f"{Fore.BLUE}Processing {len(lines)} texts...{Style.RESET_ALL}")
+    info_print(f"Processing {len(lines)} texts from {file_path}...")
     
     for i, line in enumerate(lines):
-        # Show progress
-        progress = create_progress_bar(i, len(lines))
-        print(f"\r{progress}", end="")
-        
+        # Show progress (skip when quiet)
+        if not QUIET_MODE:
+            progress = create_progress_bar(i, len(lines))
+            print(f"\r{progress}", end="")
+
         # Analyze text
         result = model.analyze(line)
-        formatted = format_analysis_result(result, show_probabilities)
-        
+        result.setdefault("text", line)
+
         results.append(result)
-        formatted_results.append(formatted)
+
+        # Handle JSON-stream output
+        if getattr(model.settings, "json_stream", False):
+            json_line = format_result_as_json(result, include_probabilities=show_probabilities)
+            print(json_line)
+            formatted_results.append(json_line)
+        else:
+            formatted = format_analysis_result(result, show_probabilities, model.settings)
+            formatted_results.append(formatted)
     
     # Complete the progress bar
-    print(f"\r{create_progress_bar(len(lines), len(lines))}")
-    print(f"{Fore.GREEN}Analysis complete!{Style.RESET_ALL}")
+    if not QUIET_MODE:
+        print(create_progress_bar(len(lines), len(lines)))
+    info_print(f"Completed analyzing {len(lines)} lines.")
     
     # Export results if output file specified
     if output_file and output_format:
@@ -540,7 +676,7 @@ def process_batch_comparison(
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = [line.strip() for line in f if line.strip()]
     except Exception as e:
-        print(f"{Fore.RED}Error reading file: {e}{Style.RESET_ALL}")
+        print_error(f"Error reading file: {e}")
         sys.exit(1)
     
     comparison = ModelComparison(models)
@@ -548,23 +684,53 @@ def process_batch_comparison(
     formatted_results = []
     
     # Process with progress bar
-    print(f"{Fore.BLUE}Processing {len(lines)} texts with {len(models)} models...{Style.RESET_ALL}")
+    info_print(f"Processing {len(lines)} texts with {len(models)} models from {file_path}...")
     
     for i, line in enumerate(lines):
         # Show progress
-        progress = create_progress_bar(i, len(lines))
-        print(f"\r{progress}", end="")
-        
+        if not QUIET_MODE:
+            progress = create_progress_bar(i, len(lines))
+            print(f"\r{progress}", end="")
+
         # Compare models on text
         result = comparison.compare(line)
-        formatted = comparison.format_comparison(result, show_probabilities)
-        
         results.append(result)
-        formatted_results.append(formatted)
+
+        json_stream_enabled = hasattr(models[0], "settings") and getattr(models[0].settings, "json_stream", False) is True
+        if json_stream_enabled:
+            # Build compact JSON representation similar to compare_models above
+            comp_payload: Dict[str, Any] = {
+                "text": line,
+                "comparison": {},
+            }
+            for m_name, res in result.items():
+                comp_payload["comparison"][m_name] = {
+                    "sentiment": {
+                        "label": res["sentiment"].get("label", ""),
+                        "score": res["sentiment"].get("score", 0.0),
+                    },
+                    "emotion": {
+                        "label": res["emotion"].get("label", ""),
+                        "score": res["emotion"].get("score", 0.0),
+                    },
+                }
+                if show_probabilities:
+                    if "raw_probabilities" in res["sentiment"]:
+                        comp_payload["comparison"][m_name]["sentiment"]["probabilities"] = res["sentiment"].get("raw_probabilities", {})
+                    if "raw_probabilities" in res["emotion"]:
+                        comp_payload["comparison"][m_name]["emotion"]["probabilities"] = res["emotion"].get("raw_probabilities", {})
+
+            formatted_line = json.dumps(comp_payload, ensure_ascii=False)
+            print(formatted_line)
+            formatted_results.append(formatted_line)
+        else:
+            formatted = comparison.format_comparison(result, show_probabilities)
+            formatted_results.append(formatted)
     
     # Complete the progress bar
-    print(f"\r{create_progress_bar(len(lines), len(lines))}")
-    print(f"{Fore.GREEN}Comparison complete!{Style.RESET_ALL}")
+    if not QUIET_MODE:
+        print(create_progress_bar(len(lines), len(lines)))
+    info_print("Comparison complete")
     
     # Export results if output file specified
     if output_file and output_format:
@@ -667,7 +833,7 @@ def run_interactive_mode(
                     try:
                         export_results(results, export_format, export_file)
                     except Exception as e:
-                        print(f"{Fore.RED}Export failed: {e}{Style.RESET_ALL}")
+                        print_error(f"Export failed: {e}")
                 
                 # Show history
                 elif command == ":history":
@@ -723,7 +889,8 @@ def run_interactive_mode(
             print(f"\n{Fore.YELLOW}Use :quit to exit{Style.RESET_ALL}")
         
         except Exception as e:
-            print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+            print_error(f"Error: {e}")
+            sys.exit(1)
 
 def run_comparison_mode(
     models: List[SentimentEmotionTransformer],
@@ -845,7 +1012,7 @@ def run_comparison_mode(
                     try:
                         export_comparison_results(results, export_format, export_file)
                     except Exception as e:
-                        print(f"{Fore.RED}Export failed: {e}{Style.RESET_ALL}")
+                        print_error(f"Export failed: {e}")
                 
                 # Show agreement statistics
                 elif command == ":stats":
@@ -927,17 +1094,60 @@ def run_comparison_mode(
             print(f"\n{Fore.YELLOW}Use :quit to exit{Style.RESET_ALL}")
         
         except Exception as e:
-            print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+            print_error(f"Error: {e}")
+            sys.exit(1)
 
 def main():
     """
     Main entry point for CLI.
     """
-    # Initialize colorama
-    init()
-    
     # Parse command line arguments
     args = parse_args()
+
+    # If NDJSON streaming requested, force quiet mode for clean output
+    if getattr(args, "json_stream", False):
+        args.quiet = True
+
+    # Global quiet mode flag
+    global QUIET_MODE  # noqa: PLW0603
+    QUIET_MODE = getattr(args, "quiet", False)
+
+    # info_print and print_error already defined globally and respect QUIET_MODE
+
+    # Handle no-colour flag OR json-stream flag BEFORE any coloured output
+    if getattr(args, "no_colour", False) or getattr(args, "json_stream", False):
+        # Re-initialise colorama to strip all ANSI codes
+        init(strip=True, autoreset=True)
+
+        class _NoColor(str):
+            def __getattr__(self, name):
+                return ""
+
+        import colorama as _colorama_mod
+        _colorama_mod.Fore = _NoColor()
+        _colorama_mod.Back = _NoColor()
+        _colorama_mod.Style = _NoColor()
+
+        os.environ["ANSI_COLORS_DISABLED"] = "1"
+
+    else:
+        # Force colors even in non-TTY environments (e.g., subprocess)
+        init(autoreset=True, convert=False, strip=False)
+    
+    # Apply summary-only preference to settings when created later
+    settings = Settings()
+
+    settings.set_quiet_mode(QUIET_MODE)
+    settings.set_summary_only(getattr(args, "summary_only", False))
+    settings.set_json_stream(getattr(args, "json_stream", False))
+
+    # Handle settings reset early and exit
+    if getattr(args, "reset_settings", False):
+        if Settings().reset_to_defaults().save_settings():
+            print(f"{Fore.GREEN}Settings have been reset to defaults.{Style.RESET_ALL}")
+        else:
+            print(f"{Fore.YELLOW}Settings reset to defaults, but could not be persisted to disk.{Style.RESET_ALL}")
+        return
     
     try:
         # Handle comparison mode
@@ -966,7 +1176,8 @@ def main():
             args.sentiment_threshold,
             args.emotion_threshold,
             args.local_model_path,
-            args.model_name
+            args.model_name,
+            settings # Pass settings to load_transformer_model
         )
         
         # Process based on input method
@@ -987,25 +1198,34 @@ def main():
                 args.format if args.output else None, args.output
             )
             
-            # Print first few results if not saving to file
-            if not args.output:
-                max_display = 5
-                for i, formatted in enumerate(formatted_results[:max_display]):
-                    print(f"\n{Fore.CYAN}Result {i+1}:{Style.RESET_ALL}")
-                    print(formatted)
+            # Print first few results if not saving to file and not in JSON stream mode
+            if not args.output and not getattr(args, "json_stream", False):
+                # Check if summary-only mode is enabled
+                is_summary_only = getattr(args, "summary_only", False)
                 
-                # If more results, show message
-                if len(results) > max_display:
-                    print(f"\n{Fore.YELLOW}... and {len(results) - max_display} more results{Style.RESET_ALL}")
-                    print(f"{Fore.YELLOW}Use --output option to save all results to a file{Style.RESET_ALL}")
+                if is_summary_only:
+                    # In summary-only mode, print results directly without headers
+                    for formatted in formatted_results:
+                        print(formatted)
+                else:
+                    # Normal mode with "Result X:" headers
+                    max_display = 5
+                    for i, formatted in enumerate(formatted_results[:max_display]):
+                        print(f"\n{Fore.CYAN}Result {i+1}:{Style.RESET_ALL}")
+                        print(formatted)
+                    
+                    # If more results, show message
+                    if len(results) > max_display:
+                        print(f"\n{Fore.YELLOW}... and {len(results) - max_display} more results{Style.RESET_ALL}")
+                        print(f"{Fore.YELLOW}Use --output option to save all results to a file{Style.RESET_ALL}")
         
         else:
             # This should never happen due to default behavior in parse_args
-            print(f"{Fore.RED}No input method specified. Use --text, --file, or --interactive{Style.RESET_ALL}")
+            print_error(f"No input method specified. Use --text, --file, or --interactive")
     
     except KeyboardInterrupt:
         print(f"\n{Fore.YELLOW}Operation cancelled by user.{Style.RESET_ALL}")
     
     except Exception as e:
-        print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}")
+        print_error(f"Error: {e}")
         sys.exit(1)
