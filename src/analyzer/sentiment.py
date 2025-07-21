@@ -501,3 +501,72 @@ def calculate_sentiment_agreement(results: List[SentimentResult]) -> float:
         return 1.0
     counts = Counter(r.sentiment for r in results)
     return counts.most_common(1)[0][1] / len(results)
+
+
+def analyze_sentiment(text: str, threshold: float = 0.5, use_fallback: bool = False) -> Dict[str, Any]:
+    """
+    Analyze sentiment of a text using the sentiment engine.
+    
+    Args:
+        text (str): Text to analyze
+        threshold (float): Confidence threshold
+        use_fallback (bool): Whether to use API fallback
+        
+    Returns:
+        Dict: Sentiment analysis results
+    """
+    try:
+        # Create sentiment engine instance
+        engine = SentimentEngine()
+        
+        # Analyze the text
+        result = engine.analyze(text)
+        
+        # Convert to dictionary format
+        sentiment_data = result.as_dict()
+        
+        # Add prediction and confidence for compatibility
+        sentiment_data["prediction"] = result.sentiment
+        sentiment_data["confidence"] = result.confidence
+        
+        # Add scores for compatibility
+        sentiment_data["scores"] = {
+            "positive": max(0, result.score) if result.score > 0 else 0,
+            "negative": max(0, -result.score) if result.score < 0 else 0,
+            "neutral": 1 - abs(result.score)
+        }
+        
+        return sentiment_data
+        
+    except Exception as e:
+        # Fallback to simple analysis if engine fails
+        if use_fallback:
+            # Simple rule-based fallback
+            positive_words = ["good", "great", "excellent", "amazing", "wonderful", "love", "like", "happy"]
+            negative_words = ["bad", "terrible", "awful", "hate", "dislike", "sad", "angry", "horrible"]
+            
+            text_lower = text.lower()
+            positive_count = sum(1 for word in positive_words if word in text_lower)
+            negative_count = sum(1 for word in negative_words if word in text_lower)
+            
+            if positive_count > negative_count:
+                prediction = "positive"
+                confidence = min(0.8, 0.5 + (positive_count - negative_count) * 0.1)
+            elif negative_count > positive_count:
+                prediction = "negative"
+                confidence = min(0.8, 0.5 + (negative_count - positive_count) * 0.1)
+            else:
+                prediction = "neutral"
+                confidence = 0.5
+            
+            return {
+                "prediction": prediction,
+                "confidence": confidence,
+                "scores": {
+                    "positive": positive_count / max(1, positive_count + negative_count),
+                    "negative": negative_count / max(1, positive_count + negative_count),
+                    "neutral": 1 - (positive_count + negative_count) / max(1, positive_count + negative_count)
+                }
+            }
+        else:
+            raise e
