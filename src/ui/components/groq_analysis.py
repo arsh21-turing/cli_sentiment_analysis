@@ -14,11 +14,17 @@ class GroqAnalysisComponent:
     Creates and manages Groq analysis interface.
     """
     
-    def __init__(self):
+    def __init__(self, key_manager=None):
         """
         Initialize the Groq analysis component.
+        
+        Args:
+            key_manager: Widget key manager for unique keys
         """
         self.formatter = ResultsFormatter()
+        self.key_manager = key_manager
+        if self.key_manager:
+            self.key_manager.register_component('groq_analysis', 'ga')
     
     def render(self):
         """
@@ -65,7 +71,8 @@ class GroqAnalysisComponent:
         text = st.text_area(
             "Enter text to analyze with Groq:",
             height=200,
-            placeholder="Type or paste your text here for Groq-powered analysis..."
+            placeholder="Type or paste your text here for Groq-powered analysis...",
+            key=self.key_manager.get_key('groq_analysis', 'text_input') if self.key_manager else None
         )
         
         # Analysis options
@@ -74,16 +81,29 @@ class GroqAnalysisComponent:
         col1, col2 = st.columns(2)
         
         with col1:
-            analyze_sentiment = st.checkbox("Analyze Sentiment", value=True)
+            analyze_sentiment = st.checkbox(
+                "Analyze Sentiment", 
+                value=True,
+                key=self.key_manager.get_key('groq_analysis', 'analyze_sentiment') if self.key_manager else None
+            )
         
         with col2:
-            analyze_emotion = st.checkbox("Analyze Emotions", value=True)
+            analyze_emotion = st.checkbox(
+                "Analyze Emotions", 
+                value=True,
+                key=self.key_manager.get_key('groq_analysis', 'analyze_emotion') if self.key_manager else None
+            )
         
         if not analyze_sentiment and not analyze_emotion:
             st.warning("Please select at least one analysis type.")
         
         # Analysis button
-        if st.button("Analyze with Groq", use_container_width=False, disabled=not (analyze_sentiment or analyze_emotion)):
+        if st.button(
+            "Analyze with Groq", 
+            use_container_width=False, 
+            disabled=not (analyze_sentiment or analyze_emotion),
+            key=self.key_manager.get_key('groq_analysis', 'analyze_button') if self.key_manager else None
+        ):
             if not text or text.isspace():
                 st.error("❌ Error: Please enter text to analyze. The text field cannot be empty.")
             else:
@@ -275,7 +295,7 @@ class GroqAnalysisComponent:
             # Store text in session state for regular analysis
             st.session_state.compare_text = results["text"]
             st.session_state.active_tab = "Single Text Analysis"
-            st.experimental_rerun()
+            st.rerun()
         
         # Export functionality
         st.markdown("---")
@@ -413,13 +433,24 @@ class GroqAnalysisComponent:
             
             # Display the parameters used with better formatting
             st.markdown("### Parameters Used")
-            params_col1, params_col2, params_col3 = st.columns(3)
-            with params_col1:
-                st.metric("Model", results['parameters']['groq_model'])
-            with params_col2:
-                st.metric("Batch Size", results['parameters']['batch_size'])
-            with params_col3:
-                st.metric("Processing Type", "Groq API")
+            
+            # Check if parameters exist and handle missing keys
+            if results and 'parameters' in results and results['parameters']:
+                params = results['parameters']
+                params_col1, params_col2, params_col3 = st.columns(3)
+                
+                with params_col1:
+                    groq_model = params.get('groq_model', 'llama3-70b-8192')
+                    st.metric("Model", groq_model)
+                
+                with params_col2:
+                    batch_size = params.get('batch_size', 5)
+                    st.metric("Batch Size", batch_size)
+                
+                with params_col3:
+                    st.metric("Processing Type", "Groq API")
+            else:
+                st.info("Parameters information not available")
             
             # Add report generation section
             from src.ui.components.report_generator import ReportGenerator

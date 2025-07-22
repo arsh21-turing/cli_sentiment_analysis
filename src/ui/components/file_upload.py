@@ -9,6 +9,7 @@ import io
 import time
 from src.models.transformer import SentimentEmotionTransformer
 from src.ui.utils.display import ResultsFormatter
+from src.utils.logging_system import LoggingSystem, log_user_action, log_performance
 
 
 class FileUploadComponent:
@@ -16,14 +17,21 @@ class FileUploadComponent:
     Creates and manages file upload interface.
     """
     
-    def __init__(self):
+    def __init__(self, key_manager=None):
         """
         Initialize the file upload component.
+        
+        Args:
+            key_manager: Widget key manager for unique keys
         """
         self.formatter = ResultsFormatter()
         self.supported_files = ["csv", "txt"]
         self.max_file_size_mb = 10  # Maximum file size in MB
         self.model = None
+        self.logger = LoggingSystem()
+        self.key_manager = key_manager
+        if self.key_manager:
+            self.key_manager.register_component('file_upload', 'fu')
     
     def get_model(self):
         """
@@ -46,7 +54,8 @@ class FileUploadComponent:
         uploaded_file = st.file_uploader(
             "Upload a file for batch analysis",
             type=self.supported_files,
-            help=f"Supported file types: {', '.join(self.supported_files)}. Maximum file size: {self.max_file_size_mb}MB."
+            help=f"Supported file types: {', '.join(self.supported_files)}. Maximum file size: {self.max_file_size_mb}MB.",
+            key=self.key_manager.get_key('file_upload', 'file_uploader') if self.key_manager else None
         )
         
         # Status area for file validation
@@ -76,7 +85,8 @@ class FileUploadComponent:
                     # Allow user to select the text column
                     text_column = st.selectbox(
                         "Select text column to analyze:",
-                        options=df_preview.columns.tolist()
+                        options=df_preview.columns.tolist(),
+                        key=self.key_manager.get_key('file_upload', 'text_column') if self.key_manager else None
                     )
                     
                     # Reset the file pointer for later processing
@@ -89,7 +99,11 @@ class FileUploadComponent:
             # Process button with progress handling
             col1, col2 = st.columns([1, 3])
             with col1:
-                process_button = st.button("Process File", use_container_width=True)
+                process_button = st.button(
+                    "Process File", 
+                    use_container_width=True,
+                    key=self.key_manager.get_key('file_upload', 'process_button') if self.key_manager else None
+                )
             
             with col2:
                 # Add processing time estimate based on file size
@@ -97,6 +111,19 @@ class FileUploadComponent:
                     st.caption("⚠️ Large file detected. Processing may take a minute or more.")
                 else:
                     st.caption("⏱️ Processing typically takes 10-30 seconds.")
+            
+            # Process file when button is clicked
+            if process_button:
+                # Log user action
+                self.logger.log_user_action(
+                    "process_batch_file",
+                    details={
+                        "file_name": uploaded_file.name,
+                        "file_size": uploaded_file.size,
+                        "file_type": uploaded_file.type,
+                        "text_column": text_column
+                    }
+                )
             
             # Process file when button is clicked
             if process_button:
@@ -328,6 +355,7 @@ class FileUploadComponent:
         
         return texts
     
+    @log_performance(category="DATA_PROCESSING", operation="process_batch")
     def process_batch(self, texts, params, progress_bar=None):
         """
         Process a batch of texts.
@@ -537,13 +565,25 @@ class FileUploadComponent:
             
             # Display the parameters used with better formatting
             st.markdown("### Parameters Used")
-            params_col1, params_col2, params_col3 = st.columns(3)
-            with params_col1:
-                st.metric("Sentiment Threshold", f"{results['parameters']['sentiment_threshold']:.2f}")
-            with params_col2:
-                st.metric("Emotion Threshold", f"{results['parameters']['emotion_threshold']:.2f}")
-            with params_col3:
-                st.metric("API Fallback", "Enabled" if results['parameters']['use_api_fallback'] else "Disabled")
+            
+            # Check if parameters exist and handle missing keys
+            if results and 'parameters' in results and results['parameters']:
+                params = results['parameters']
+                params_col1, params_col2, params_col3 = st.columns(3)
+                
+                with params_col1:
+                    sentiment_threshold = params.get('sentiment_threshold', 0.5)
+                    st.metric("Sentiment Threshold", f"{sentiment_threshold:.2f}")
+                
+                with params_col2:
+                    emotion_threshold = params.get('emotion_threshold', 0.3)
+                    st.metric("Emotion Threshold", f"{emotion_threshold:.2f}")
+                
+                with params_col3:
+                    use_api_fallback = params.get('use_api_fallback', False)
+                    st.metric("API Fallback", "Enabled" if use_api_fallback else "Disabled")
+            else:
+                st.info("Parameters information not available")
             
             # Add report generation section
             from src.ui.components.report_generator import ReportGenerator

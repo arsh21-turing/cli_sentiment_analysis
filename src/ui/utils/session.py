@@ -5,6 +5,7 @@ Provides persistence of parameters between interactions.
 
 import streamlit as st
 import re
+from datetime import datetime
 
 
 class SessionManager:
@@ -16,35 +17,52 @@ class SessionManager:
         """
         Initialize session state with default values if not already present.
         """
-        if "initialized" not in st.session_state:
-            st.session_state.initialized = True
-            
-            # Analysis parameters
+        # Always ensure these keys exist, regardless of initialization status
+        if "sentiment_threshold" not in st.session_state:
             st.session_state.sentiment_threshold = 0.5
+        if "emotion_threshold" not in st.session_state:
             st.session_state.emotion_threshold = 0.3
+        if "use_api_fallback" not in st.session_state:
             st.session_state.use_api_fallback = False
-            
-            # Results storage
-            st.session_state.analysis_results = None
+        
+        # Results storage
+        if "analysis_results" not in st.session_state:
+            st.session_state.analysis_results = []
+        if "batch_results" not in st.session_state:
             st.session_state.batch_results = None
+        if "processing_complete" not in st.session_state:
             st.session_state.processing_complete = False
+        if "groq_results" not in st.session_state:
             st.session_state.groq_results = None
+        if "groq_processing_complete" not in st.session_state:
             st.session_state.groq_processing_complete = False
-            
-            # Groq API settings
+        
+        # Groq API settings
+        if "groq_api_key" not in st.session_state:
             st.session_state.groq_api_key = ""
+        if "groq_model" not in st.session_state:
             st.session_state.groq_model = "llama3-70b-8192"
+        if "use_groq" not in st.session_state:
             st.session_state.use_groq = False
-            
-            # UI state
+        
+        # UI state
+        if "active_tab" not in st.session_state:
             st.session_state.active_tab = "Single Text Analysis"
+        if "compare_text" not in st.session_state:
             st.session_state.compare_text = ""
-            
-            # Usage statistics
+        
+        # Usage statistics
+        if "texts_analyzed" not in st.session_state:
             st.session_state.texts_analyzed = 0
+        if "standard_requests" not in st.session_state:
             st.session_state.standard_requests = 0
+        if "groq_requests" not in st.session_state:
             st.session_state.groq_requests = 0
-            st.session_state.session_start_time = None
+        if "session_start_time" not in st.session_state:
+            st.session_state.session_start_time = datetime.now()
+        
+        # Mark as initialized
+        st.session_state.initialized = True
     
     def get_params(self):
         """
@@ -92,7 +110,7 @@ class SessionManager:
         st.session_state.use_api_fallback = False
         
         # Reset results
-        st.session_state.analysis_results = None
+        st.session_state.analysis_results = []
         st.session_state.batch_results = None
         st.session_state.processing_complete = False
         st.session_state.groq_results = None
@@ -153,8 +171,7 @@ class SessionManager:
         """
         # Initialize session start time if not set
         if st.session_state.session_start_time is None:
-            import datetime
-            st.session_state.session_start_time = datetime.datetime.now()
+            st.session_state.session_start_time = datetime.now()
         
         # Update counters
         st.session_state.texts_analyzed += count
@@ -175,8 +192,7 @@ class SessionManager:
         # Calculate session duration
         duration = None
         if st.session_state.session_start_time:
-            import datetime
-            duration = datetime.datetime.now() - st.session_state.session_start_time
+            duration = datetime.now() - st.session_state.session_start_time
         
         return {
             "texts_analyzed": st.session_state.texts_analyzed,
@@ -184,3 +200,37 @@ class SessionManager:
             "groq_requests": st.session_state.groq_requests,
             "session_duration": duration
         } 
+
+    def cleanup_stale_session_state(self):
+        """
+        Clean up stale session state variables that might cause rendering issues.
+        """
+        # List of session state keys that should be cleaned up
+        stale_keys = [
+            'show_export_options',
+            'show_save_dialog', 
+            'show_load_dialog',
+            'show_manage_dialog',
+            'confirm_delete',
+            'confirm_delete_all',
+            'compare_text',
+            'text_to_analyze',
+            'prefill_text',
+            'tab_selection'
+        ]
+        
+        # Clean up stale keys
+        for key in stale_keys:
+            if key in st.session_state:
+                # Only clean up if the value is None or empty
+                if st.session_state[key] is None or st.session_state[key] == "":
+                    del st.session_state[key]
+        
+        # Clean up any None values in session state
+        keys_to_remove = []
+        for key, value in st.session_state.items():
+            if value is None:
+                keys_to_remove.append(key)
+        
+        for key in keys_to_remove:
+            del st.session_state[key] 

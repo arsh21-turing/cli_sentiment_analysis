@@ -177,7 +177,7 @@ class ResultsFormatter:
             
             # Apply styling if sentiment column exists
             if 'sentiment' in df.columns:
-                styled_df = df.style.applymap(style_sentiment, subset=['sentiment'])
+                styled_df = df.style.map(style_sentiment, subset=['sentiment'])
                 st.dataframe(
                     styled_df,
                     use_container_width=True,

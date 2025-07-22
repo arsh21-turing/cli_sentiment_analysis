@@ -5,6 +5,10 @@ Provides parameter controls for the text analysis functionality.
 
 import streamlit as st
 import re
+import pyperclip
+import time
+from datetime import datetime
+import html
 from src.ui.utils.session import SessionManager
 
 
@@ -13,14 +17,18 @@ class SidebarComponent:
     Creates and manages sidebar controls for parameter configuration.
     """
     
-    def __init__(self, title="Parameters"):
+    def __init__(self, title="Parameters", key_manager=None):
         """
         Initialize the sidebar component.
         
         Args:
             title (str): Title displayed at top of sidebar
+            key_manager: Widget key manager for unique keys
         """
         self.title = title
+        self.key_manager = key_manager
+        if self.key_manager:
+            self.key_manager.register_component('sidebar', 'sb')
         self.groq_models = [
             "llama3-70b-8192",
             "llama3-8b-8192",
@@ -54,6 +62,10 @@ class SidebarComponent:
             # Create Groq API configuration
             groq_api_key, groq_model, use_groq = self.create_groq_section()
         
+        # Add Quick Analysis section
+        with st.sidebar.expander("Quick Analysis", expanded=True):
+            self.create_quick_analysis_section()
+        
         # Return all parameters as a dictionary
         return {
             "sentiment_threshold": sentiment_threshold,
@@ -77,7 +89,8 @@ class SidebarComponent:
             max_value=1.0,
             value=0.5,
             step=0.01,
-            help="Confidence threshold for sentiment classification"
+            help="Confidence threshold for sentiment classification",
+            key=self.key_manager.get_key('sidebar', 'sentiment_threshold') if self.key_manager else None
         )
         
         emotion_threshold = st.sidebar.slider(
@@ -86,7 +99,8 @@ class SidebarComponent:
             max_value=1.0,
             value=0.3,
             step=0.01,
-            help="Confidence threshold for emotion detection"
+            help="Confidence threshold for emotion detection",
+            key=self.key_manager.get_key('sidebar', 'emotion_threshold') if self.key_manager else None
         )
         
         return sentiment_threshold, emotion_threshold
@@ -101,7 +115,8 @@ class SidebarComponent:
         use_api_fallback = st.sidebar.toggle(
             "Use API Fallback",
             value=False,
-            help="Fall back to external API if local model fails"
+            help="Fall back to external API if local model fails",
+            key=self.key_manager.get_key('sidebar', 'use_api_fallback') if self.key_manager else None
         )
         
         return use_api_fallback
@@ -122,7 +137,8 @@ class SidebarComponent:
         use_groq = st.sidebar.checkbox(
             "Use Groq API",
             value=current_use_groq,
-            help="Enable Groq API for analysis"
+            help="Enable Groq API for analysis",
+            key=self.key_manager.get_key('sidebar', 'use_groq') if self.key_manager else None
         )
         
         # API key input
@@ -132,7 +148,8 @@ class SidebarComponent:
             value=current_groq_api_key,
             disabled=not use_groq,
             help="Enter your Groq API key (stored securely)",
-            placeholder="gsk_xxxxxxxxxxxxxxxxxxxxxxxx"
+            placeholder="gsk_xxxxxxxxxxxxxxxxxxxxxxxx",
+            key=self.key_manager.get_key('sidebar', 'groq_api_key') if self.key_manager else None
         )
         
         # Model selection
@@ -141,7 +158,8 @@ class SidebarComponent:
             options=self.groq_models,
             index=self.groq_models.index(current_groq_model) if current_groq_model in self.groq_models else 0,
             disabled=not use_groq,
-            help="Select the Groq model to use for analysis"
+            help="Select the Groq model to use for analysis",
+            key=self.key_manager.get_key('sidebar', 'groq_model') if self.key_manager else None
         )
         
         # Display API key status
@@ -150,7 +168,11 @@ class SidebarComponent:
                 st.sidebar.success("API key format is valid.")
                 
                 # Test connection button
-                if st.sidebar.button("Test Connection", disabled=not groq_api_key):
+                if st.sidebar.button(
+                    "Test Connection", 
+                    disabled=not groq_api_key,
+                    key=self.key_manager.get_key('sidebar', 'test_connection') if self.key_manager else None
+                ):
                     self._test_groq_connection(groq_api_key, groq_model)
             else:
                 st.sidebar.warning("API key format is invalid or empty.")
@@ -249,4 +271,163 @@ Session Statistics
             else:
                 duration_str = f"{int(duration_mins)}m"
             
-            st.sidebar.caption(f"Session time: {duration_str}") 
+            st.sidebar.caption(f"Session time: {duration_str}")
+    
+    def create_quick_analysis_section(self):
+        """
+        Creates Quick Analysis section for clipboard text processing.
+        """
+        # Explain the clipboard feature
+        st.sidebar.markdown(
+            """
+            Analyze text from your clipboard instantly. Copy text anywhere, 
+            then click the button below for quick results.
+            """
+        )
+        
+        # Quick Analysis button
+        if st.sidebar.button("📋 Analyze Clipboard", use_container_width=True):
+            try:
+                # Try to get text from clipboard
+                clipboard_text = pyperclip.paste()
+                
+                if not clipboard_text or clipboard_text.strip() == "":
+                    st.sidebar.error("Clipboard is empty. Copy some text first.")
+                    return
+                
+                # Show a spinner while analyzing
+                with st.sidebar.spinner("Analyzing clipboard text..."):
+                    # Process the text
+                    result = self.analyze_clipboard_text(clipboard_text)
+                
+                # Show results in a compact format
+                self.display_compact_results(result, clipboard_text)
+                
+            except Exception as e:
+                st.sidebar.error(f"Error accessing clipboard: {str(e)}")
+                st.sidebar.info("Make sure you have text copied to your clipboard.")
+    
+    def analyze_clipboard_text(self, text):
+        """
+        Analyzes clipboard text and updates real-time data.
+        
+        Args:
+            text: Text to analyze
+            
+        Returns:
+            Analysis result
+        """
+        # Get the transformer model from session state
+        if 'transformer_model' not in st.session_state:
+            raise ValueError("Transformer model not found in session state")
+        
+        transformer = st.session_state.transformer_model
+        
+        # Process text
+        result = transformer.analyze(text)
+        
+        # Add timestamp
+        result['timestamp'] = datetime.now().isoformat()
+        
+        # Push to real-time connector if available
+        if 'real_time_connector' in st.session_state:
+            st.session_state.real_time_connector.push(result)
+        
+        # Store in session state analysis results
+        if 'analysis_results' not in st.session_state:
+            st.session_state.analysis_results = []
+        st.session_state.analysis_results.append(result)
+        
+        return result
+    
+    def display_compact_results(self, result, original_text):
+        """
+        Displays analysis results in a compact format in the sidebar.
+        
+        Args:
+            result: Analysis result to display
+            original_text: The original text that was analyzed
+        """
+        # Create an expander for the results
+        with st.sidebar.expander("Analysis Results", expanded=True):
+            # Truncate and escape the original text for display
+            max_display_length = 100
+            display_text = original_text[:max_display_length]
+            if len(original_text) > max_display_length:
+                display_text += "..."
+            display_text = html.escape(display_text)
+            
+            # Format sentiment with color and emoji
+            sentiment = result['sentiment']
+            label = sentiment['label']
+            score = sentiment['score']
+            
+            # Choose color and emoji based on sentiment
+            if label.lower() == 'positive':
+                sentiment_color = "green"
+                emoji = "😊"
+            elif label.lower() == 'negative':
+                sentiment_color = "red"
+                emoji = "😟"
+            else:
+                sentiment_color = "gray"
+                emoji = "😐"
+            
+            # Display sentiment
+            st.sidebar.markdown(f"**Text**: {display_text}")
+            st.sidebar.markdown(
+                f"**Sentiment**: {emoji} <span style='color: {sentiment_color};'>{label.upper()} ({score:.2f})</span>",
+                unsafe_allow_html=True
+            )
+            
+            # Display emotion if available
+            if 'emotion' in result:
+                emotion = result['emotion']
+                emotion_label = emotion['label']
+                emotion_score = emotion['score']
+                
+                # Map emotions to emojis
+                emotion_emojis = {
+                    'joy': '😄',
+                    'sadness': '😢',
+                    'anger': '😠',
+                    'fear': '😨',
+                    'surprise': '😲',
+                    'love': '❤️',
+                    'disgust': '🤢',
+                }
+                
+                emotion_emoji = emotion_emojis.get(emotion_label.lower(), '🙂')
+                
+                st.sidebar.markdown(
+                    f"**Emotion**: {emotion_emoji} {emotion_label.upper()} ({emotion_score:.2f})"
+                )
+            
+            # Add timestamp in a small font
+            if 'timestamp' in result:
+                try:
+                    timestamp = datetime.fromisoformat(result['timestamp'])
+                    time_str = timestamp.strftime("%H:%M:%S")
+                    st.sidebar.markdown(f"<small>Analyzed at {time_str}</small>", unsafe_allow_html=True)
+                except:
+                    pass
+            
+            # Add buttons for actions
+            col1, col2 = st.sidebar.columns(2)
+            
+            with col1:
+                # View in dashboard option
+                if st.button("📊 View in Dashboard", use_container_width=True, key="view_dashboard"):
+                    # Set session state to switch to analytics tab
+                    if 'tab_selection' not in st.session_state:
+                        st.session_state.tab_selection = 5  # Index of Real-Time Analytics tab
+                        st.session_state.should_rerun = True
+            
+            with col2:
+                # Detailed analysis option
+                if st.button("🔍 Detailed Analysis", use_container_width=True, key="detailed"):
+                    # Set session state to switch to single text analysis tab
+                    if 'tab_selection' not in st.session_state:
+                        st.session_state.tab_selection = 0  # Index of Single Text Analysis tab
+                        st.session_state.text_to_analyze = original_text
+                        st.session_state.should_rerun = True 

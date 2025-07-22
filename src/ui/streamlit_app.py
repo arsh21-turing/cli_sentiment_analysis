@@ -18,8 +18,13 @@ from src.ui.components.file_upload import FileUploadComponent
 from src.ui.components.groq_analysis import GroqAnalysisComponent
 from src.ui.components.comparison import ComparisonComponent
 from src.ui.components.analytics_dashboard import AnalyticsDashboard
+from src.ui.components.log_dashboard import LogDashboard
 from src.ui.utils.session import SessionManager
 from src.ui.utils.comparison_utils import ModelComparator
+from src.utils.real_time import RealTimeDataConnector
+from src.utils.logging_system import LoggingSystem, LogLevel, LogCategory
+from src.utils.widget_key_manager import WidgetKeyManager
+from datetime import datetime
 
 
 def setup_page():
@@ -105,138 +110,349 @@ def check_comparison_availability():
     return len(available_models) >= 2
 
 
+def initialize_data_connector():
+    """
+    Initializes the real-time data connector.
+    """
+    # Check if real-time connector already exists in session state
+    if 'real_time_connector' not in st.session_state:
+        # Create new connector
+        connector = RealTimeDataConnector(max_queue_size=1000, ttl_seconds=3600)
+        connector.attach_to_session(st.session_state)
+        st.session_state.real_time_connector = connector
+
+
+def process_with_real_time_updates(text: str, model=None) -> dict:
+    """
+    Process text with real-time updates to the data connector.
+    
+    Args:
+        text: Text to analyze
+        model: Model to use for analysis, defaults to transformer_model
+        
+    Returns:
+        Analysis result
+    """
+    # Use specified model or default transformer
+    if model is None:
+        if 'transformer_model' in st.session_state:
+            model = st.session_state.transformer_model
+        else:
+            # Create default transformer if one doesn't exist
+            from src.models.transformer import SentimentEmotionTransformer
+            model = SentimentEmotionTransformer()
+            st.session_state.transformer_model = model
+    
+    # Process text
+    result = model.analyze(text)
+    
+    # Add timestamp
+    result['timestamp'] = datetime.now().isoformat()
+    
+    # Add parameters to the result
+    if 'transformer_model' in st.session_state:
+        # Get current parameters from session state
+        result['parameters'] = {
+            'sentiment_threshold': st.session_state.get('sentiment_threshold', 0.5),
+            'emotion_threshold': st.session_state.get('emotion_threshold', 0.3),
+            'use_api_fallback': st.session_state.get('use_api_fallback', False)
+        }
+    
+    # Push to real-time connector
+    if 'real_time_connector' in st.session_state:
+        st.session_state.real_time_connector.push(result)
+    
+    # Store in session state analysis results
+    if 'analysis_results' not in st.session_state or st.session_state.analysis_results is None:
+        st.session_state.analysis_results = []
+    st.session_state.analysis_results.append(result)
+    
+    return result
+
+
+def init_logging_system():
+    """Initializes the logging system."""
+    # Create logs directory in the application directory
+    import os
+    logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "logs")
+    
+    # Initialize LoggingSystem
+    logger = LoggingSystem(
+        log_dir=logs_dir,
+        retention_days=30,
+        log_level=LogLevel.INFO,
+        enable_file=True,
+        enable_console=True,
+        enable_audit=True,
+        enable_metrics=True
+    )
+    
+    return logger
+
+
 def main():
     """Main application entry point."""
+    # Add error recovery mechanism
+    if 'app_error' in st.session_state:
+        st.error("Previous error detected. Attempting to recover...")
+        del st.session_state.app_error
+        st.rerun()
+    
     try:
         # Setup page configuration
         setup_page()
         
-        # Initialize session state
-        session_manager = SessionManager()
-        session_manager.init_session()
+        # Initialize key manager
+        if 'key_manager' not in st.session_state:
+            st.session_state.key_manager = WidgetKeyManager()
+        
+        # Initialize logging system
+        logger = init_logging_system()
+        
+        # Log session start
+        logger.log_system_event(
+            "New user session started", 
+            LogLevel.INFO, 
+            LogCategory.SYSTEM
+        )
+        
+        # Initialize session state with proper error handling
+        try:
+            session_manager = SessionManager()
+            session_manager.init_session()
+            # Clean up any stale session state
+            session_manager.cleanup_stale_session_state()
+        except Exception as e:
+            st.error(f"Session initialization error: {str(e)}")
+            logger.log_system_event(
+                f"Session initialization failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return
+        
+        # Initialize export options state
+        if 'show_export_options' not in st.session_state:
+            st.session_state.show_export_options = False
+        
+        # Initialize save/load dialog states
+        if 'show_save_dialog' not in st.session_state:
+            st.session_state.show_save_dialog = False
+        if 'show_load_dialog' not in st.session_state:
+            st.session_state.show_load_dialog = False
+        if 'show_manage_dialog' not in st.session_state:
+            st.session_state.show_manage_dialog = False
+        if 'confirm_delete' not in st.session_state:
+            st.session_state.confirm_delete = None
+        if 'confirm_delete_all' not in st.session_state:
+            st.session_state.confirm_delete_all = False
+        
+        # Initialize real-time data connector
+        try:
+            initialize_data_connector()
+        except Exception as e:
+            st.error(f"Real-time connector initialization error: {str(e)}")
+            logger.log_system_event(
+                f"Real-time connector initialization failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+        
+        # Ensure batch_results is initialized
+        if 'batch_results' not in st.session_state:
+            st.session_state.batch_results = None
+        
+        # Make real-time processing function available
+        st.process_with_real_time_updates = process_with_real_time_updates
+        
+        # Reset key counters for main components
+        st.session_state.key_manager.reset_component('main')
         
         # Create sidebar with configuration parameters
-        sidebar = SidebarComponent(title="Analysis Parameters")
-        params = sidebar.create_sidebar()
-        session_manager.update_params(params)
+        try:
+            sidebar = SidebarComponent(title="Analysis Parameters", key_manager=st.session_state.key_manager)
+            params = sidebar.create_sidebar()
+            session_manager.update_params(params)
+        except Exception as e:
+            st.error(f"Sidebar initialization error: {str(e)}")
+            logger.log_system_event(
+                f"Sidebar initialization failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return
         
-        # Sidebar actions
-        st.sidebar.markdown("---")
-        col1, col2 = st.sidebar.columns(2)
+        # Handle text from quick analysis or comparison
+        compare_text = st.session_state.get("compare_text", None)
         
-        with col1:
-            if st.button("Reset Settings", use_container_width=True):
-                session_manager.reset_session(keep_api_keys=True)
-                st.experimental_rerun()
-        
-        with col2:
-            if st.button("Clear API Keys", use_container_width=True):
-                session_manager.clear_api_keys()
-                st.experimental_rerun()
-        
-        # Add Groq status indicator
-        if check_groq_availability():
-            st.sidebar.success("✅ Groq API is ready to use")
-        else:
-            st.sidebar.warning("⚠️ Groq API is not configured")
-        
-        # Add comparison status indicator
-        if check_comparison_availability():
-            st.sidebar.success("✅ Model comparison is available")
-        else:
-            st.sidebar.warning("⚠️ Model comparison requires Groq API")
-        
-        # Add global export options
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("📥 Global Export Options")
-        
-        if st.sidebar.button("Export Session Statistics", use_container_width=True):
-            # Create the export manager
-            from src.ui.components.export_manager import ExportManager
-            export_manager = ExportManager()
-            
-            # Get session stats
-            stats = session_manager.get_session_stats()
-            formatted_stats = {"session_stats": stats}
-            
-            # Render export panel
-            export_manager.render_export_panel("session", formatted_stats)
-        
-        # Check if we're comparing text from Groq analysis
-        if st.session_state.get("compare_text", ""):
-            compare_text = st.session_state.compare_text
-            st.session_state.compare_text = ""  # Clear it after reading
-            st.session_state.active_tab = "Single Text Analysis"
-        else:
-            compare_text = None
-        
-        # Create tabs for different analysis modes
-        tab1, tab2, tab3, tab4, tab5 = st.tabs([
-            "📝 Single Text Analysis", 
-            "📁 File Upload", 
-            "🚀 Groq Analysis",
-            "🔄 Model Comparison",
-            "📊 Analytics Dashboard"
-        ])
+        # Create tabs with error handling
+        try:
+            tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+                "Single Text Analysis", 
+                "File Upload", 
+                "Groq Analysis", 
+                "Model Comparison", 
+                "Analytics Dashboard",
+                "Real-Time Analytics",
+                "Logs & Audit"
+            ])
+        except Exception as e:
+            st.error(f"Tab creation error: {str(e)}")
+            logger.log_system_event(
+                f"Tab creation failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+            return
         
         # Handle Single Text Analysis tab
-        with tab1:
-            text_analysis = TextAnalysisComponent()
-            
-            # If we have text to compare, prefill it
-            if compare_text:
-                st.session_state.prefill_text = compare_text
-                st.info("Text copied from Groq Analysis for comparison")
-            
-            text_analysis.render()
+        try:
+            with tab1:
+                st.session_state.key_manager.reset_component('text_analysis')
+                text_analysis = TextAnalysisComponent(key_manager=st.session_state.key_manager)
+                
+                # If we have text to compare or analyze, prefill it
+                if compare_text:
+                    st.session_state.prefill_text = compare_text
+                    if st.session_state.get("compare_text"):
+                        st.info("Text copied from Groq Analysis for comparison")
+                    else:
+                        st.info("Text from Quick Analysis loaded")
+                
+                text_analysis.render()
+        except Exception as e:
+            st.error(f"Text analysis tab error: {str(e)}")
+            logger.log_system_event(
+                f"Text analysis tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
             
         # Handle File Upload tab  
-        with tab2:
-            file_upload = FileUploadComponent()
-            file_upload.render()
+        try:
+            with tab2:
+                st.session_state.key_manager.reset_component('file_upload')
+                file_upload = FileUploadComponent(key_manager=st.session_state.key_manager)
+                file_upload.render()
+        except Exception as e:
+            st.error(f"File upload tab error: {str(e)}")
+            logger.log_system_event(
+                f"File upload tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
             
         # Handle Groq Analysis tab
-        with tab3:
-            groq_analysis = GroqAnalysisComponent()
-            groq_analysis.render()
+        try:
+            with tab3:
+                st.session_state.key_manager.reset_component('groq_analysis')
+                groq_analysis = GroqAnalysisComponent(key_manager=st.session_state.key_manager)
+                groq_analysis.render()
+        except Exception as e:
+            st.error(f"Groq analysis tab error: {str(e)}")
+            logger.log_system_event(
+                f"Groq analysis tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
         
         # Handle Model Comparison tab
-        with tab4:
-            comparison = ComparisonComponent()
-            comparison.render()
+        try:
+            with tab4:
+                st.session_state.key_manager.reset_component('comparison')
+                comparison = ComparisonComponent(key_manager=st.session_state.key_manager)
+                comparison.render()
+        except Exception as e:
+            st.error(f"Model comparison tab error: {str(e)}")
+            logger.log_system_event(
+                f"Model comparison tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
         
         # Handle Analytics Dashboard tab
-        with tab5:
-            analytics_dashboard = AnalyticsDashboard()
-            analytics_dashboard.render()
+        try:
+            with tab5:
+                st.session_state.key_manager.reset_component('analytics_dashboard')
+                analytics_dashboard = AnalyticsDashboard(
+                    session_state=st.session_state,
+                    key_manager=st.session_state.key_manager
+                )
+                analytics_dashboard.render()
+        except Exception as e:
+            st.error(f"Analytics dashboard tab error: {str(e)}")
+            logger.log_system_event(
+                f"Analytics dashboard tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
         
-        # Footer with app info
-        st.markdown("---")
-        st.markdown(
-            """
-<div>
-            Text Analysis Tool | Version 1.3 | Built with Streamlit | Featuring Advanced Analytics
-</div>
-            """, 
-            unsafe_allow_html=True
-        )
-
-    except Exception as e:
-        # Global error handling
-        st.error("An unexpected error occurred in the application.")
+        # Handle Real-Time Analytics tab
+        try:
+            with tab6:
+                st.session_state.key_manager.reset_component('real_time_analytics')
+                analytics_dashboard = AnalyticsDashboard(
+                    session_state=st.session_state,
+                    key_manager=st.session_state.key_manager
+                )
+                analytics_dashboard.render_real_time_dashboard()
+        except Exception as e:
+            st.error(f"Real-time analytics tab error: {str(e)}")
+            logger.log_system_event(
+                f"Real-time analytics tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
         
-        # Technical details in expander
-        with st.expander("Technical Details"):
-            st.write("Error details:")
-            st.code(traceback.format_exc())
+        # Handle Logs & Audit tab
+        try:
+            with tab7:
+                st.session_state.key_manager.reset_component('logs')
+                logs_dashboard = LogDashboard(
+                    session_state=st.session_state,
+                    key_manager=st.session_state.key_manager
+                )
+                logs_dashboard.render()
+        except Exception as e:
+            st.error(f"Logs dashboard tab error: {str(e)}")
+            logger.log_system_event(
+                f"Logs dashboard tab failed: {str(e)}", 
+                LogLevel.ERROR, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+        
+        # Handle rerun request from sidebar actions
+        if 'should_rerun' in st.session_state and st.session_state.should_rerun:
+            del st.session_state.should_rerun
+            st.rerun()
             
-            # Suggestion for recovery
-            st.info("""
-            Suggestions:
-            1. Try refreshing the page
-            2. Check your input data
-            3. Reset all settings using the button in the sidebar
-            """)
+    except Exception as e:
+        st.error(f"Application initialization error: {str(e)}")
+        # Set error flag for recovery
+        st.session_state.app_error = True
+        # Log the error
+        try:
+            logger = LoggingSystem()
+            logger.log_system_event(
+                f"Application initialization failed: {str(e)}", 
+                LogLevel.CRITICAL, 
+                LogCategory.SYSTEM,
+                exception=e
+            )
+        except:
+            pass  # If logging fails, just show the error
+        st.stop()
 
 
 if __name__ == "__main__":
