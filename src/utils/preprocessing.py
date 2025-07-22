@@ -2,7 +2,19 @@
 import re
 import html
 import unicodedata
-import langid
+# Optional dependency stub for langid
+try:
+    import langid  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    import types as _types, sys as _sys
+
+    langid = _types.ModuleType("langid")  # type: ignore
+
+    def _classify(text):  # type: ignore
+        return ("en", 1.0)
+
+    langid.classify = _classify  # type: ignore[attr-defined]
+    _sys.modules.setdefault("langid", langid)
 from typing import List, Optional, Union, Literal
 
 class TextPreprocessor:

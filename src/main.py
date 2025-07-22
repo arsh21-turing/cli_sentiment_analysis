@@ -260,121 +260,14 @@ def main():
     """
     Main entry point for CLI.
     """
-    # Parse command line arguments
-    args = parse_args()
-
-    # If NDJSON streaming requested, force quiet mode for clean output
-    if getattr(args, "json_stream", False):
-        args.quiet = True
-
-    # Global quiet mode flag
-    global QUIET_MODE  # noqa: PLW0603
-    QUIET_MODE = getattr(args, "quiet", False)
-
-    # info_print and print_error already defined globally and respect QUIET_MODE
-
-    # Handle no-colour flag OR json-stream flag BEFORE any coloured output
-    if getattr(args, "no_colour", False) or getattr(args, "json_stream", False):
-        # Re-initialise colorama to strip all ANSI codes
-        init(strip=True, autoreset=True)
-
-        class _NoColor(str):
-            def __getattr__(self, name):
-                return ""
-
-        import colorama as _colorama_mod
-        _colorama_mod.Fore = _NoColor()
-        _colorama_mod.Back = _NoColor()
-        _colorama_mod.Style = _NoColor()
-
-        os.environ["ANSI_COLORS_DISABLED"] = "1"
-
-    else:
-        # Force colors even in non-TTY environments (e.g., subprocess)
-        init(autoreset=True, convert=False, strip=False)
-    
-    # Apply summary-only preference to settings when created later
-    settings = Settings()
-
-    settings.set_quiet_mode(QUIET_MODE)
-    settings.set_summary_only(getattr(args, "summary_only", False))
-    settings.set_json_stream(getattr(args, "json_stream", False))
-
-    # Handle settings reset early and exit
-    if getattr(args, "reset_settings", False):
-        if Settings().reset_to_defaults().save_settings():
-            print(f"{Fore.GREEN}Settings have been reset to defaults.{Style.RESET_ALL}")
-        else:
-            print(f"{Fore.YELLOW}Settings reset to defaults, but could not be persisted to disk.{Style.RESET_ALL}")
-        return
-
-    info_print(f"Analyzing: \"{args.text}\"")
-    
+    # Import CLI functionality
     try:
-        # Load the model
-        model = SentimentEmotionTransformer(
-            sentiment_model=args.sentiment_model,
-            emotion_model=args.emotion_model,
-            sentiment_threshold=args.sentiment_threshold,
-            emotion_threshold=args.emotion_threshold,
-            local_model_path=args.local_model_path,
-            name=args.model_name,
-        )
-        
-        # Attach settings to the model
-        model.settings = settings
-        
-        # Process based on input method
-        if args.text:
-            result = model.analyze(args.text)
-            
-            if getattr(args, "json_stream", False):
-                formatted = format_result_as_json(result, include_probabilities=args.show_probabilities)
-                print(formatted)
-            else:
-                formatted = format_analysis_result(result, args.show_probabilities, settings)
-                print(formatted)
-        
-        elif args.file:
-            # Process file
-            try:
-                with open(args.file, 'r', encoding='utf-8') as f:
-                    lines = [line.strip() for line in f if line.strip()]
-            except Exception as e:
-                print_error(f"Error reading file: {e}")
-                sys.exit(1)
-            
-            info_print(f"Processing {len(lines)} texts from {args.file}...")
-            
-            for i, line in enumerate(lines):
-                # Show progress (skip when quiet)
-                if not QUIET_MODE:
-                    progress = create_progress_bar(i, len(lines))
-                    print(f"\r{progress}", end="")
-
-                # Analyze text
-                result = model.analyze(line)
-                result.setdefault("text", line)
-
-                # Handle JSON-stream output
-                if getattr(args, "json_stream", False):
-                    json_line = format_result_as_json(result, include_probabilities=args.show_probabilities)
-                    print(json_line)
-                else:
-                    formatted = format_analysis_result(result, args.show_probabilities, settings)
-                    print(formatted)
-            
-            # Complete the progress bar
-            if not QUIET_MODE:
-                print(create_progress_bar(len(lines), len(lines)))
-            info_print(f"Completed analyzing {len(lines)} lines.")
+        from .utils.cli import main as cli_main
+    except ImportError:
+        from utils.cli import main as cli_main
     
-    except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}Operation cancelled by user.{Style.RESET_ALL}")
-    
-    except Exception as e:
-        print_error(f"Error: {e}")
-        sys.exit(1)
+    # Delegate to CLI main function
+    cli_main()
 
 
 if __name__ == "__main__":
