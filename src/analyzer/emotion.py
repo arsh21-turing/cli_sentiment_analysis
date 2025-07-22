@@ -578,3 +578,92 @@ def get_emotion_description(emotion_result: EmotionResult) -> str:
         description += ", with a relatively neutral overall tone."
         
     return description
+
+
+def analyze_emotion(text: str, threshold: float = 0.3, use_fallback: bool = False) -> Dict[str, Any]:
+    """
+    Analyze emotion of a text using the emotion detector.
+    
+    Args:
+        text (str): Text to analyze
+        threshold (float): Confidence threshold
+        use_fallback (bool): Whether to use API fallback
+        
+    Returns:
+        Dict: Emotion analysis results
+    """
+    try:
+        # Create emotion detector instance
+        detector = EmotionDetector(threshold=threshold)
+        
+        # Analyze the text
+        result = detector.detect_emotion(text)
+        
+        # Convert to dictionary format
+        emotion_data = result.as_dict()
+        
+        # Add prediction and confidence for compatibility
+        emotion_data["prediction"] = result.primary_emotion.value
+        emotion_data["confidence"] = result.primary_score
+        
+        # Add scores for compatibility
+        if result.all_emotions:
+            emotion_data["scores"] = {e.value: s for e, s in result.all_emotions.items()}
+        else:
+            # Create basic scores if all_emotions is not available
+            emotion_data["scores"] = {
+                result.primary_emotion.value: result.primary_score
+            }
+            if result.secondary_emotion and result.secondary_score:
+                emotion_data["scores"][result.secondary_emotion.value] = result.secondary_score
+        
+        # Add top emotions for compatibility
+        if result.all_emotions:
+            sorted_emotions = sorted(result.all_emotions.items(), key=lambda x: x[1], reverse=True)
+            emotion_data["top_emotions"] = [(e.value, s) for e, s in sorted_emotions[:3]]
+        else:
+            emotion_data["top_emotions"] = [(result.primary_emotion.value, result.primary_score)]
+            if result.secondary_emotion and result.secondary_score:
+                emotion_data["top_emotions"].append((result.secondary_emotion.value, result.secondary_score))
+        
+        return emotion_data
+        
+    except Exception as e:
+        # Fallback to simple analysis if detector fails
+        if use_fallback:
+            # Simple rule-based fallback
+            emotion_keywords = {
+                "joy": ["happy", "joy", "excited", "pleased", "delighted", "cheerful"],
+                "sadness": ["sad", "depressed", "melancholy", "gloomy", "sorrowful"],
+                "anger": ["angry", "mad", "furious", "irritated", "annoyed"],
+                "fear": ["afraid", "scared", "terrified", "anxious", "worried"],
+                "surprise": ["surprised", "shocked", "amazed", "astonished"],
+                "disgust": ["disgusted", "revolted", "appalled", "sickened"],
+                "trust": ["trust", "confident", "reliable", "faithful"],
+                "anticipation": ["excited", "eager", "hopeful", "expectant"]
+            }
+            
+            text_lower = text.lower()
+            emotion_scores = {}
+            
+            for emotion, keywords in emotion_keywords.items():
+                score = sum(1 for keyword in keywords if keyword in text_lower)
+                if score > 0:
+                    emotion_scores[emotion] = min(0.8, score * 0.2)
+            
+            if emotion_scores:
+                primary_emotion = max(emotion_scores.items(), key=lambda x: x[1])
+                prediction = primary_emotion[0]
+                confidence = primary_emotion[1]
+            else:
+                prediction = "neutral"
+                confidence = 0.5
+            
+            return {
+                "prediction": prediction,
+                "confidence": confidence,
+                "scores": emotion_scores,
+                "top_emotions": [(emotion, score) for emotion, score in sorted(emotion_scores.items(), key=lambda x: x[1], reverse=True)]
+            }
+        else:
+            raise e
