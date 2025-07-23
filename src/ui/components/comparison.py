@@ -19,13 +19,19 @@ class ComparisonComponent:
     Creates and manages the comparison interface.
     """
     
-    def __init__(self):
+    def __init__(self, key_manager=None):
         """
         Initialize comparison component.
+        
+        Args:
+            key_manager: Widget key manager for unique keys
         """
         self.comparator = ModelComparator()
         self.formatter = ResultsFormatter()
         self.report_generator = ReportGenerator()
+        self.key_manager = key_manager
+        if self.key_manager:
+            self.key_manager.register_component('comparison', 'comp')
     
     def render(self):
         """
@@ -76,7 +82,8 @@ class ComparisonComponent:
         text = st.text_area(
             "Enter text to analyze with multiple models:",
             height=150,
-            placeholder="Type or paste your text here for comparison across models..."
+            placeholder="Type or paste your text here for comparison across models...",
+            key=self.key_manager.get_key('comparison', 'single_text_input') if self.key_manager else 'single_text_input'
         )
         
         # Model selection
@@ -102,10 +109,10 @@ class ComparisonComponent:
         col1, col2 = st.columns(2)
         
         with col1:
-            analyze_sentiment = st.checkbox("Analyze Sentiment", value=True, key="compare_sentiment")
+            analyze_sentiment = st.checkbox("Analyze Sentiment", value=True, key=self.key_manager.get_key('comparison', 'single_sentiment') if self.key_manager else "compare_sentiment")
         
         with col2:
-            analyze_emotion = st.checkbox("Analyze Emotions", value=True, key="compare_emotion")
+            analyze_emotion = st.checkbox("Analyze Emotions", value=True, key=self.key_manager.get_key('comparison', 'single_emotion') if self.key_manager else "compare_emotion")
         
         # Determine analysis type
         analysis_type = "both"
@@ -149,7 +156,8 @@ class ComparisonComponent:
         input_method = st.radio(
             "Input Method",
             options=["Upload File", "Enter Text List"],
-            horizontal=True
+            horizontal=True,
+            key=self.key_manager.get_key('comparison', 'input_method') if self.key_manager else None
         )
         
         texts = []
@@ -174,7 +182,8 @@ class ComparisonComponent:
                         # Select text column
                         text_column = st.selectbox(
                             "Select text column:",
-                            options=df.columns.tolist()
+                            options=df.columns.tolist(),
+                            key=self.key_manager.get_key('comparison', 'text_column') if self.key_manager else None
                         )
                         
                         # Get texts
@@ -202,7 +211,8 @@ class ComparisonComponent:
             text_list = st.text_area(
                 "Enter multiple texts (one per line):",
                 height=200,
-                placeholder="Enter one text per line for batch comparison..."
+                placeholder="Enter one text per line for batch comparison...",
+                key=self.key_manager.get_key('comparison', 'batch_text_input') if self.key_manager else 'batch_text_input'
             )
             
             if text_list:
@@ -242,10 +252,10 @@ class ComparisonComponent:
             col1, col2 = st.columns(2)
             
             with col1:
-                analyze_sentiment = st.checkbox("Analyze Sentiment", value=True, key="batch_sentiment")
+                analyze_sentiment = st.checkbox("Analyze Sentiment", value=True, key=self.key_manager.get_key('comparison', 'batch_sentiment') if self.key_manager else "batch_sentiment")
             
             with col2:
-                analyze_emotion = st.checkbox("Analyze Emotions", value=False, key="batch_emotion")
+                analyze_emotion = st.checkbox("Analyze Emotions", value=False, key=self.key_manager.get_key('comparison', 'batch_emotion') if self.key_manager else "batch_emotion")
             
             # Determine analysis type
             analysis_type = "both"
@@ -260,7 +270,8 @@ class ComparisonComponent:
                 min_value=1,
                 max_value=10,
                 value=3,
-                help="Number of texts to process in parallel per model"
+                help="Number of texts to process in parallel per model",
+                key=self.key_manager.get_key('comparison', 'batch_size') if self.key_manager else None
             )
             
             # Compare button
@@ -391,7 +402,8 @@ class ComparisonComponent:
         
         # Display the analyzed text
         with st.expander("Analyzed Text", expanded=True):
-            st.text_area("Text", value=results.get("text", ""), height=100, disabled=True)
+            st.text_area("Text", value=results.get("text", ""), height=100, disabled=True,
+                        key=self.key_manager.get_key('comparison', 'display_text') if self.key_manager else 'display_text')
         
         # Get the model IDs
         model_ids = [model_id for model_id in results.get("models_compared", [])]

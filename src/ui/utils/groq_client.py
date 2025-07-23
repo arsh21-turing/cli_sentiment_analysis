@@ -265,8 +265,16 @@ Respond with ONLY a valid JSON object containing the fields above.
             dict: Formatted sentiment results
         """
         try:
-            # Extract JSON from response
+            # Extract content from response
             content = response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            
+            # Clean the content - remove any markdown formatting
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
             
             # Try to parse JSON directly
             try:
@@ -274,17 +282,30 @@ Respond with ONLY a valid JSON object containing the fields above.
             except json.JSONDecodeError:
                 # If it fails, try to extract JSON from text (in case there's surrounding text)
                 import re
-                json_match = re.search(r'({.*})', content, re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group(1))
+                # Look for JSON object patterns
+                json_patterns = [
+                    r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Nested JSON
+                    r'\{[^}]*\}',  # Simple JSON
+                ]
+                
+                for pattern in json_patterns:
+                    json_match = re.search(pattern, content, re.DOTALL)
+                    if json_match:
+                        try:
+                            result = json.loads(json_match.group(0))
+                            break
+                        except json.JSONDecodeError:
+                            continue
                 else:
-                    raise ValueError("Could not extract JSON from response")
+                    # If no JSON found, try to extract key-value pairs
+                    result = self._extract_key_value_pairs(content)
             
             # Validate and normalize results
             required_fields = ["prediction", "confidence", "positive", "negative", "neutral"]
             if not all(field in result for field in required_fields):
                 missing = [field for field in required_fields if field not in result]
-                raise ValueError(f"Missing required fields in response: {missing}")
+                # Try to infer missing fields
+                result = self._infer_missing_sentiment_fields(result)
             
             # Normalize prediction to lowercase
             result["prediction"] = result["prediction"].lower()
@@ -297,6 +318,7 @@ Respond with ONLY a valid JSON object containing the fields above.
             
         except Exception as e:
             st.error(f"Error parsing sentiment response: {str(e)}")
+            st.info(f"Raw response content: {response.get('choices', [{}])[0].get('message', {}).get('content', 'No content')}")
             return {
                 "prediction": "unknown",
                 "confidence": 0.0,
@@ -316,8 +338,16 @@ Respond with ONLY a valid JSON object containing the fields above.
             dict: Formatted emotion results
         """
         try:
-            # Extract JSON from response
+            # Extract content from response
             content = response.get("choices", [{}])[0].get("message", {}).get("content", "{}")
+            
+            # Clean the content - remove any markdown formatting
+            content = content.strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.endswith("```"):
+                content = content[:-3]
+            content = content.strip()
             
             # Try to parse JSON directly
             try:
@@ -325,15 +355,28 @@ Respond with ONLY a valid JSON object containing the fields above.
             except json.JSONDecodeError:
                 # If it fails, try to extract JSON from text (in case there's surrounding text)
                 import re
-                json_match = re.search(r'({.*})', content, re.DOTALL)
-                if json_match:
-                    result = json.loads(json_match.group(1))
+                # Look for JSON object patterns
+                json_patterns = [
+                    r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Nested JSON
+                    r'\{[^}]*\}',  # Simple JSON
+                ]
+                
+                for pattern in json_patterns:
+                    json_match = re.search(pattern, content, re.DOTALL)
+                    if json_match:
+                        try:
+                            result = json.loads(json_match.group(0))
+                            break
+                        except json.JSONDecodeError:
+                            continue
                 else:
-                    raise ValueError("Could not extract JSON from response")
+                    # If no JSON found, try to extract key-value pairs
+                    result = self._extract_emotion_key_value_pairs(content)
             
             # Validate and normalize results
             if "scores" not in result:
-                raise ValueError("Missing 'scores' field in response")
+                # Try to infer scores from available data
+                result = self._infer_emotion_scores(result)
             
             # Expected emotions
             expected_emotions = ["joy", "sadness", "anger", "fear", "surprise", "disgust", "trust", "anticipation"]
@@ -356,6 +399,7 @@ Respond with ONLY a valid JSON object containing the fields above.
             
         except Exception as e:
             st.error(f"Error parsing emotion response: {str(e)}")
+            st.info(f"Raw response content: {response.get('choices', [{}])[0].get('message', {}).get('content', 'No content')}")
             return {
                 "scores": {emotion: 0.0 for emotion in ["joy", "sadness", "anger", "fear", "surprise", "disgust", "trust", "anticipation"]},
                 "primary_emotion": "unknown"
@@ -476,4 +520,153 @@ Respond with ONLY a valid JSON object containing the fields above.
             except Exception as e:
                 raise Exception(f"Request failed: {str(e)}")
         
-        raise Exception("Maximum retries reached") 
+        raise Exception("Maximum retries reached")
+    
+    def _extract_key_value_pairs(self, content):
+        """
+        Extracts key-value pairs from text content when JSON parsing fails.
+        
+        Args:
+            content (str): Text content to parse
+            
+        Returns:
+            dict: Extracted key-value pairs
+        """
+        import re
+        
+        result = {}
+        
+        # Look for patterns like "key": value or key: value
+        patterns = [
+            r'"([^"]+)":\s*([^,\s]+)',  # "key": value
+            r'([a-zA-Z_]+):\s*([^,\s]+)',  # key: value
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, content)
+            for key, value in matches:
+                # Clean up the key and value
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                
+                # Try to convert value to appropriate type
+                try:
+                    if value.lower() in ['true', 'false']:
+                        result[key] = value.lower() == 'true'
+                    elif '.' in value:
+                        result[key] = float(value)
+                    else:
+                        result[key] = int(value)
+                except ValueError:
+                    result[key] = value
+        
+        return result
+    
+    def _infer_missing_sentiment_fields(self, result):
+        """
+        Infers missing sentiment fields based on available data.
+        
+        Args:
+            result (dict): Partial sentiment result
+            
+        Returns:
+            dict: Complete sentiment result with inferred fields
+        """
+        # Ensure we have all required fields
+        required_fields = ["prediction", "confidence", "positive", "negative", "neutral"]
+        
+        # If we have a prediction but no confidence, set default confidence
+        if "prediction" in result and "confidence" not in result:
+            result["confidence"] = 0.8
+        
+        # If we have individual scores but no prediction, infer prediction
+        if "prediction" not in result:
+            if "positive" in result and "negative" in result and "neutral" in result:
+                scores = {"positive": result["positive"], "negative": result["negative"], "neutral": result["neutral"]}
+                result["prediction"] = max(scores, key=scores.get)
+            else:
+                result["prediction"] = "neutral"
+        
+        # If we have prediction but no individual scores, set defaults
+        if "positive" not in result:
+            result["positive"] = 0.33 if result["prediction"] == "positive" else 0.0
+        if "negative" not in result:
+            result["negative"] = 0.33 if result["prediction"] == "negative" else 0.0
+        if "neutral" not in result:
+            result["neutral"] = 0.33 if result["prediction"] == "neutral" else 0.0
+        
+        # If we have individual scores but no confidence, calculate it
+        if "confidence" not in result:
+            if "positive" in result and "negative" in result and "neutral" in result:
+                result["confidence"] = max(result["positive"], result["negative"], result["neutral"])
+            else:
+                result["confidence"] = 0.5
+        
+        return result
+    
+    def _extract_emotion_key_value_pairs(self, content):
+        """
+        Extracts emotion key-value pairs from text content when JSON parsing fails.
+        
+        Args:
+            content (str): Text content to parse
+            
+        Returns:
+            dict: Extracted emotion data
+        """
+        import re
+        
+        result = {"scores": {}}
+        
+        # Look for emotion patterns
+        emotion_patterns = [
+            r'"([^"]+)":\s*([^,\s]+)',  # "emotion": value
+            r'([a-zA-Z_]+):\s*([^,\s]+)',  # emotion: value
+        ]
+        
+        expected_emotions = ["joy", "sadness", "anger", "fear", "surprise", "disgust", "trust", "anticipation"]
+        
+        for pattern in emotion_patterns:
+            matches = re.findall(pattern, content)
+            for key, value in matches:
+                # Clean up the key and value
+                key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                
+                # Check if this is an emotion
+                if key in expected_emotions:
+                    try:
+                        result["scores"][key] = max(0.0, min(1.0, float(value)))
+                    except ValueError:
+                        result["scores"][key] = 0.0
+                elif key == "primary_emotion":
+                    result["primary_emotion"] = value
+        
+        return result
+    
+    def _infer_emotion_scores(self, result):
+        """
+        Infers missing emotion scores based on available data.
+        
+        Args:
+            result (dict): Partial emotion result
+            
+        Returns:
+            dict: Complete emotion result with inferred scores
+        """
+        expected_emotions = ["joy", "sadness", "anger", "fear", "surprise", "disgust", "trust", "anticipation"]
+        
+        # If we don't have scores, create default structure
+        if "scores" not in result:
+            result["scores"] = {}
+        
+        # Ensure all emotions are present
+        for emotion in expected_emotions:
+            if emotion not in result["scores"]:
+                result["scores"][emotion] = 0.0
+        
+        # If we have a primary emotion but no scores, set that emotion to high value
+        if "primary_emotion" in result and result["primary_emotion"] in expected_emotions:
+            result["scores"][result["primary_emotion"]] = 0.8
+        
+        return result

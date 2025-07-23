@@ -13,6 +13,7 @@ from requests.exceptions import RequestException
 
 from ..utils.preprocessing import TextPreprocessor
 from ..utils.labels import SentimentLabels, EmotionLabels, LabelMapper
+from ..utils.logging_system import log_model_prediction
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -143,6 +144,7 @@ class GroqModel:
         logger.warning(f"Invalid model ID: {model_id}. Using default: {self.DEFAULT_MODEL}")
         return self.DEFAULT_MODEL
     
+    @log_model_prediction("groq")
     def analyze_sentiment(self, text: str) -> Dict[str, Any]:
         """
         Analyze the sentiment of the provided text using Groq API.
@@ -177,6 +179,7 @@ class GroqModel:
         
         return result
     
+    @log_model_prediction("groq")
     def analyze_emotion(self, text: str) -> Dict[str, Any]:
         """
         Analyze the emotion of the provided text using Groq API.
@@ -209,6 +212,7 @@ class GroqModel:
         
         return result
     
+    @log_model_prediction("groq")
     def analyze(self, text: str) -> Dict[str, Any]:
         """
         Analyze both sentiment and emotion of the provided text using Groq API.
